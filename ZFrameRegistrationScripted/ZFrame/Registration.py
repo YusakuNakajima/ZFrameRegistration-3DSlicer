@@ -409,6 +409,7 @@ class ZFrameRegistration:
         
         # Check that the fiducial geometry makes sense
         print("ZTrackerTransform - Checking the fiducial geometries...")
+        print(f"Zcoordinates: {Zcoordinates}")
         if not self.CheckFiducialGeometry(Zcoordinates, dimension[0], dimension[1]):
             print("ZTrackerTransform::onEventGenerated - Bad fiducial geometry. No frame lock on this image.")
             return False
@@ -608,28 +609,35 @@ class ZFrameRegistration:
             norm = np.linalg.norm(vector)
             return vector / norm if norm != self.MEPSILON else vector
 
-        # Get corner points
-        P1 = np.array(Zcoordinates[0])
-        P3 = np.array(Zcoordinates[2])
-        P5 = np.array(Zcoordinates[4])
-        P7 = np.array(Zcoordinates[6])
+        if self.numFiducials == 7:
+            # Get corner points
+            P1 = np.array(Zcoordinates[0])
+            P3 = np.array(Zcoordinates[2])
+            P5 = np.array(Zcoordinates[4])
+            P7 = np.array(Zcoordinates[6])
 
-        # Calculate normalized direction vectors
-        D71 = get_normalized_vector(P1, P7)
-        D53 = get_normalized_vector(P3, P5)
-        D13 = get_normalized_vector(P3, P1)
-        D75 = get_normalized_vector(P5, P7)
+            # Calculate normalized direction vectors
+            D71 = get_normalized_vector(P1, P7)
+            D53 = get_normalized_vector(P3, P5)
+            D13 = get_normalized_vector(P3, P1)
+            D75 = get_normalized_vector(P5, P7)
 
-        # Check that opposite edges are within 10 degrees of parallel
-        # using dot product (cos of angle between vectors)
-        dotp = np.dot(D71, D53)
-        dotp = abs(dotp)
-        if dotp < np.cos(5.0 * np.pi / 180.0):
-            return False
+            # Check that opposite edges are within 10 degrees of parallel
+            # using dot product (cos of angle between vectors)
+            dotp = np.dot(D71, D53)
+            dotp = abs(dotp)
+            if dotp < np.cos(5.0 * np.pi / 180.0):
+                return False
 
-        dotp = np.dot(D13, D75)
-        dotp = abs(dotp)
-        if dotp < np.cos(5.0 * np.pi / 180.0):
+            dotp = np.dot(D13, D75)
+            dotp = abs(dotp)
+            if dotp < np.cos(5.0 * np.pi / 180.0):
+                return False
+        elif self.numFiducials == 9:
+            # TODO: Implement 9-fiducial geometry check
+            print("Registration::CheckFiducialGeometry - Skipping 9-fiducial geometry check.")
+            return True
+        else:
             return False
 
         return True
