@@ -193,9 +193,13 @@ class ZFrameRegistration:
         self.manualRegistration = False
         self.zFrameFids = None
         self.ZOrientationBase = [0, 0, 0, 1]  # Default quaternion
+        self.lastDetectedCoordinates = None
         
         # Constants
         self.MEPSILON = 1e-10
+
+    def getLastDetectedCoordinates(self):
+        return self.lastDetectedCoordinates
     
     def SetFrameTopology(self, frameTopology):
         self.frameTopology = frameTopology
@@ -406,6 +410,8 @@ class ZFrameRegistration:
         if Zcoordinates is None:
             print("ZTrackerTransform::onEventGenerated - Fiducials not detected. No frame lock on this image.")
             return False
+        
+        self.lastDetectedCoordinates = Zcoordinates
         
         # Check that the fiducial geometry makes sense
         print("ZTrackerTransform - Checking the fiducial geometries...")

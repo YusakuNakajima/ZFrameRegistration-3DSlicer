@@ -130,16 +130,33 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.applyButton = qt.QPushButton("Apply")
         self.applyButton.toolTip = "Run the Z-frame registration."
         self.applyButton.enabled = True
-        parametersFormLayout.addRow(self.applyButton)
+        
+        # Visualize Topology Button
+        self.visualizeButton = qt.QPushButton("Visualize Topology")
+        self.visualizeButton.toolTip = "Visualize the Z-frame topology."
+        self.visualizeButton.enabled = True
+
+        buttonsLayout = qt.QHBoxLayout()
+        buttonsLayout.addWidget(self.applyButton)
+        buttonsLayout.addWidget(self.visualizeButton)
+        parametersFormLayout.addRow(buttonsLayout)
+
         self.applyButton.connect('clicked(bool)', self.onApplyButton)
+        self.visualizeButton.connect('clicked(bool)', self.onVisualizeButton)
         
         self.layout.addStretch(1)
         
+    def onVisualizeButton(self):
+        try:
+            self.logic.visualize_topology(self.frameTopologyTextEdit.toPlainText())
+        except Exception as e:
+            slicer.util.errorDisplay("Failed to visualize topology: "+str(e))
+            import traceback
+            traceback.print_exc()
+
     def onInputVolumeSelected(self, node):
         if node:
             dims = node.GetImageData().GetDimensions()
-            self.sliceRangeWidget.minimum = 0
-            self.sliceRangeWidget.maximum = dims[2]-1
 
     def loadZFrameConfigs(self):
         """Load Z-frame configurations from configs.txt file"""
@@ -312,7 +329,98 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             logging.error('Processing failed')
             return False
 
+    def visualize_topology(self, frameTopology):
+        """
+        Visualize the Z-frame topology by interpreting the first 3 components as
+        origin points and the next 3 as vectors.
+        """
+        logging.info('Visualizing Z-frame topology as origins and vectors.')
+
+        # Parse the frame topology string
+        logging.info(f"Input frame topology string: {frameTopology}")
+        frameTopologyArr = []
+        try:
+            frameTopologyList = ''.join(frameTopology.split()).strip("[]").split("],[")
+            for n in frameTopologyList:
+                x, y, z = map(float, n.split(","))
+                frameTopologyArr.append([x, y, z])
+        except ValueError as e:
+            error_message = f"Failed to parse frame topology. Ensure format is '[[x1,y1,z1],...]'. Error: {e}"
+            logging.error(error_message)
+            slicer.util.errorDisplay(error_message)
+            return
+
+        if len(frameTopologyArr) < 6:
+            slicer.util.errorDisplay(f"Frame topology must contain 6 elements (3 origins, 3 vectors), but got {len(frameTopologyArr)}.")
+            return
+
+        # Split into origins and vectors
+        origins = frameTopologyArr[0:3]
+        vectors = frameTopologyArr[3:6]
+        # Calculate endpoints for the vectors
+        endpoints = [list(np.array(o) + np.array(v)) for o, v in zip(origins, vectors)]
+
+        logging.info(f"Origins: {origins}")
+        logging.info(f"Vectors: {vectors}")
+        logging.info(f"Calculated Endpoints: {endpoints}")
+
+        # --- Draw points (origins and endpoints) ---
+        points_to_draw = origins + endpoints
+        point_labels = ["Origin 1", "Origin 2", "Origin 3", "Endpoint 1", "Endpoint 2", "Endpoint 3"]
+        points_node_name = "Z-Frame Topology Points"
+
+        fiducialNode = slicer.mrmlScene.GetFirstNodeByName(points_node_name)
+        if not fiducialNode:
+            fiducialNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", points_node_name)
         
+        was_modified_fid = fiducialNode.StartModify()
+        fiducialNode.RemoveAllControlPoints()
+        for i, point in enumerate(points_to_draw):
+            fiducialNode.AddControlPoint(vtk.vtkVector3d(point), point_labels[i])
+        fiducialNode.EndModify(was_modified_fid)
+
+        # Customize point display
+        displayNode = fiducialNode.GetDisplayNode()
+        if displayNode:
+            displayNode.SetGlyphScale(2.5)
+            displayNode.SetTextScale(3.5)
+            displayNode.SetVisibility(True)
+
+        # --- Draw lines representing the vectors ---
+        line_connections = [
+            ("Vector 1", 0),
+            ("Vector 2", 1),
+            ("Vector 3", 2)
+        ]
+
+        for line_name, idx in line_connections:
+            lineNode = slicer.mrmlScene.GetFirstNodeByName(line_name)
+            if not lineNode:
+                lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", line_name)
+
+            start_point = origins[idx]
+            end_point = endpoints[idx]
+
+            was_modified_line = lineNode.StartModify()
+            lineNode.RemoveAllControlPoints()
+            lineNode.AddControlPoint(vtk.vtkVector3d(start_point))
+            lineNode.AddControlPoint(vtk.vtkVector3d(end_point))
+            lineNode.EndModify(was_modified_line)
+
+            # Customize line appearance
+            lineDisplayNode = lineNode.GetDisplayNode()
+            if lineDisplayNode:
+                lineDisplayNode.SetSelectedColor(0.2, 0.5, 1.0) # Blue
+                lineDisplayNode.SetLineThickness(2.0)
+                lineDisplayNode.SetOpacity(1.0)
+                lineDisplayNode.SetVisibility(True)
+
+        # Center the 3D view
+        if origins:
+            center_point = np.mean(np.array(points_to_draw), axis=0)
+            slicer.modules.markups.logic().JumpSlicesToLocation(center_point[0], center_point[1], center_point[2], True)
+
+        slicer.util.infoDisplay(f"Topology visualization updated with {len(origins)} vectors.")        
         
         
         
