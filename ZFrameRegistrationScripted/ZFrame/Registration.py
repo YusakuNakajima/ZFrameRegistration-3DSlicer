@@ -406,7 +406,7 @@ class ZFrameRegistration:
         
         # Find the self.numFiducials Z-frame fiducial intercept artifacts in the image
         print("ZTrackerTransform - Searching fiducials...")
-        Zcoordinates, tZcoordinates = self.LocateFiducials(SourceImage, dimension[0], dimension[1])
+        Zcoordinates, tZcoordinates, center = self.LocateFiducials(SourceImage, dimension[0], dimension[1])
         if Zcoordinates is None:
             print("ZTrackerTransform::onEventGenerated - Fiducials not detected. No frame lock on this image.")
             return False
@@ -423,8 +423,8 @@ class ZFrameRegistration:
         # Transform pixel coordinates into spatial coordinates
         for i in range(self.numFiducials):
             # Put the image origin at the center
-            tZcoordinates[i][0] = float(tZcoordinates[i][0]) - float(dimension[0]/2)
-            tZcoordinates[i][1] = float(tZcoordinates[i][1]) - float(dimension[1]/2)
+            tZcoordinates[i][0] = float(tZcoordinates[i][0]) - center[0]
+            tZcoordinates[i][1] = float(tZcoordinates[i][1]) - center[1]
             
             # Scale coordinates by pixel size
             tZcoordinates[i][0] *= spacing[0]
@@ -467,8 +467,8 @@ class ZFrameRegistration:
             ysize (int): Height of the image in pixels
             
         Returns:
-            tuple: (Zcoordinates, tZcoordinates) where each is a list of 7 [x,y] coordinates,
-                or (None, None) if detection fails
+            tuple: (Zcoordinates, tZcoordinates, center) where each is a list of 7 [x,y] coordinates,
+                or (None, None, None) if detection fails
         """
         # Initialize coordinate arrays
         Zcoordinates = [[0, 0] for _ in range(self.numFiducials)]
@@ -483,7 +483,7 @@ class ZFrameRegistration:
         max_absolute = np.max(np.abs(image_fft))
         if max_absolute < self.MEPSILON:
             print("ZTrackerTransform::LocateFiducials - divide by zero.")
-            return None, None
+            return None, None, None
             
         IFreal /= max_absolute
         IFimag /= max_absolute
@@ -503,7 +503,7 @@ class ZFrameRegistration:
         max_absolute = np.max(np.abs(PIreal))
         if max_absolute < self.MEPSILON:
             print("ZTrackerTransform::LocateFiducials - divide by zero.")
-            return None, None
+            return None, None, None
             
         PIreal /= max_absolute
         
@@ -523,7 +523,7 @@ class ZFrameRegistration:
             # Check if this is a local maximum
             if peak_val < self.MEPSILON:
                 print("Registration::OrderFidPoints - peak value is zero.")
-                return None, None
+                return None, None, None
                 
             # Check peak prominence
             offpeak1 = (peak_val - PIreal[rstart, cstart]) / peak_val
@@ -536,7 +536,7 @@ class ZFrameRegistration:
                 print("Registration::LocateFiducials - Bad Peak.")
                 peak_count += 1
                 if peak_count > 10:
-                    return None, None
+                    return None, None, None
                 continue
                 
             # Find subpixel coordinates of the peak
@@ -563,7 +563,7 @@ class ZFrameRegistration:
         for i in range(self.numFiducials):
             Zcoordinates[i] = [int(tZcoordinates[i][0]), int(tZcoordinates[i][1])]
         
-        return Zcoordinates, tZcoordinates
+        return Zcoordinates, tZcoordinates, center
 
     def FindSubPixelPeak(self, peak_coords, Y0, Yx1, Yx2, Yy1, Yy2):
         """Find the subpixel coordinates of the peak using parabolic fitting.
@@ -602,11 +602,21 @@ class ZFrameRegistration:
         Returns:
             bool: True if the point geometry is valid, False otherwise
         """
+        print("Registration::CheckFiducialGeometry - Checking fiducial geometry...")
         # First check that the coordinates are in range
         for coord in Zcoordinates:
-            if (coord[0] < 0 or coord[0] >= ysize or 
-                coord[1] < 0 or coord[1] >= xsize):
-                print("Registration::CheckFiducialGeometry - fiducial coordinates out of range.")
+            print(f"Registration::CheckFiducialGeometry - Checking coordinate {coord} against image size ({xsize}, {ysize})")
+            if coord[0] < 0:
+                print(f"Registration::CheckFiducialGeometry - Decision: coord[0] ({coord[0]}) is less than 0. Returning False.")
+                return False
+            if coord[0] >= xsize:
+                print(f"Registration::CheckFiducialGeometry - Decision: coord[0] ({coord[0]}) is greater or equal to xsize ({xsize}). Returning False.")
+                return False
+            if coord[1] < 0:
+                print(f"Registration::CheckFiducialGeometry - Decision: coord[1] ({coord[1]}) is less than 0. Returning False.")
+                return False
+            if coord[1] >= ysize:
+                print(f"Registration::CheckFiducialGeometry - Decision: coord[1] ({coord[1]}) is greater or equal to ysize ({ysize}). Returning False.")
                 return False
 
         # Helper function to create normalized vector between two points
@@ -616,6 +626,7 @@ class ZFrameRegistration:
             return vector / norm if norm != self.MEPSILON else vector
 
         if self.numFiducials == 7:
+            print("Registration::CheckFiducialGeometry - Checking 7-fiducial geometry.")
             # Get corner points
             P1 = np.array(Zcoordinates[0])
             P3 = np.array(Zcoordinates[2])
@@ -627,25 +638,33 @@ class ZFrameRegistration:
             D53 = get_normalized_vector(P3, P5)
             D13 = get_normalized_vector(P3, P1)
             D75 = get_normalized_vector(P5, P7)
+            
+            print(f"Registration::CheckFiducialGeometry - D71: {D71}, D53: {D53}, D13: {D13}, D75: {D75}")
 
             # Check that opposite edges are within 10 degrees of parallel
             # using dot product (cos of angle between vectors)
             dotp = np.dot(D71, D53)
             dotp = abs(dotp)
+            print(f"Registration::CheckFiducialGeometry - Dot product of D71 and D53: {dotp}")
             if dotp < np.cos(5.0 * np.pi / 180.0):
+                print("Registration::CheckFiducialGeometry - Decision: D71 and D53 are not parallel. Returning False.")
                 return False
 
             dotp = np.dot(D13, D75)
             dotp = abs(dotp)
+            print(f"Registration::CheckFiducialGeometry - Dot product of D13 and D75: {dotp}")
             if dotp < np.cos(5.0 * np.pi / 180.0):
+                print("Registration::CheckFiducialGeometry - Decision: D13 and D75 are not parallel. Returning False.")
                 return False
         elif self.numFiducials == 9:
             # TODO: Implement 9-fiducial geometry check
-            print("Registration::CheckFiducialGeometry - Skipping 9-fiducial geometry check.")
+            print("Registration::CheckFiducialGeometry - Decision: Skipping 9-fiducial geometry check.")
             return True
         else:
+            print(f"Registration::CheckFiducialGeometry - Decision: Unsupported number of fiducials ({self.numFiducials}). Returning False.")
             return False
 
+        print("Registration::CheckFiducialGeometry - Fiducial geometry is valid. Returning True.")
         return True
 
     def FindFidCentre(self, points):
