@@ -1032,7 +1032,7 @@ class ZFrameRegistration:
             
             # Check rotation angle
             angle = 2 * np.arccos(Zorientation[3])  # w component
-            if abs(angle) > 15.0:
+            if abs(angle) > 50.0:
                 print("Registration::LocalizeFrame - Rotation angle too large, something is wrong.")
                 return None, None
             
@@ -1062,7 +1062,7 @@ class ZFrameRegistration:
             
             # Displacement of frame in image coordinates
             Zposition = Ci - Cfi
-            if abs(Zposition[2]) > 20.0:
+            if abs(Zposition[2]) > 100.0:
                 print("Registration::LocalizeFrame - Displacement too large, something is wrong.")
                 return None, None
             
@@ -1187,7 +1187,7 @@ class ZFrameRegistration:
             
             # Check rotation angle
             angle = 2 * np.arccos(Zorientation[3])  # w component
-            if abs(angle) > 15.0:
+            if abs(angle) > 50.0:
                 print("Registration::LocalizeFrame - Rotation angle too large, something is wrong.")
                 return None, None
             
@@ -1212,7 +1212,7 @@ class ZFrameRegistration:
             
             # Displacement of frame in image coordinates
             Zposition = Ci - Cfi
-            if abs(Zposition[2]) > 20.0:
+            if abs(Zposition[2]) > 100.0:
                 print("Registration::LocalizeFrame - Displacement too large, something is wrong.")
                 return None, None
             
