@@ -212,17 +212,9 @@ class ZFrameRegistration:
     def SetOrientationBase(self, orientation):
         self.ZOrientationBase = orientation
 
+    # stepSize 引数を削除し、計算は全スライスで行う
     def Register(self, sliceRange):
         """Register Z-frame fiducials across multiple slices and compute average transformation.
-        
-        Args:
-            range (list): [start_slice, end_slice] range of slices to process
-            
-        Returns:
-            tuple: (success, Zposition, Zorientation) where:
-                - success is a boolean indicating if registration was successful
-                - Zposition is a numpy array [x,y,z] of the estimated position
-                - Zorientation is a numpy array [x,y,z,w] quaternion of the estimated orientation
         """
         xsize, ysize, zsize = self.InputImageDim
         
@@ -252,7 +244,8 @@ class ZFrameRegistration:
         n = 0
         T = np.zeros((4, 4))  # Symmetric matrix for quaternion averaging
         P = np.zeros(3)  # Position accumulator
-        
+        all_detected_points = [] # 検出点保存用
+
         # Create transformation matrix
         matrix = np.eye(4)
         matrix[0:3, 0] = [ntx, nty, ntz]
@@ -261,6 +254,7 @@ class ZFrameRegistration:
         
         # Process each slice in range
         print(f"Processing slices from {sliceRange[0]} to {sliceRange[1]}")
+        # ★全スライスを処理
         for slindex in range(sliceRange[0], sliceRange[1]):
             print(f"=== Current Slice Index: {slindex} ===")
             # Calculate image center offset
@@ -281,7 +275,8 @@ class ZFrameRegistration:
             if 0 <= slindex < zsize:
                 current_slice = self.InputImage[:, :, slindex]
             else:
-                return False
+                # ★戻り値を4つに合わせる
+                return False, None, None, []
             
             # Initialize for this slice
             self.Init(xsize, ysize)
@@ -297,10 +292,18 @@ class ZFrameRegistration:
                 q = np.array(quaternion)
                 T += np.outer(q, q)
                 n += 1
+                
+                # 成功したスライスの検出座標をリストに保存
+                if self.lastDetectedCoordinates:
+                    all_detected_points.append({
+                        "slice": slindex,
+                        "points": self.lastDetectedCoordinates
+                    })
+
             print(f"=== End Slice Index: {slindex} ===\n")
                 
         if n <= 0:
-            return False, None, None
+            return False, None, None, []
             
         # Average position and normalize T matrix
         P /= float(n)
@@ -317,8 +320,6 @@ class ZFrameRegistration:
         Zorientation = eigenvecs[:, max_idx]
         
         # Force alignment with Superior direction (0,0,1)
-        # TODO: This is to ensure orientation is correct. There should be some kind of parameter for this.
-        # Convert quaternion to rotation matrix to check orientation
         transform_matrix = np.eye(4)
         transform_matrix[:3, :3] = zf.QuaternionToMatrix(Zorientation)[:3, :3]
         
@@ -339,7 +340,8 @@ class ZFrameRegistration:
             # Convert back to quaternion
             Zorientation = zf.MatrixToQuaternion(new_transform)
         
-        return True, Zposition, Zorientation
+        # ★全検出点を返す
+        return True, Zposition, Zorientation, all_detected_points
 
     def Init(self, xsize, ysize):
         """Initialize correlation kernel and perform FFT operations for fiducial detection.
