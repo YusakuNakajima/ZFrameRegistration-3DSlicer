@@ -346,32 +346,87 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
              slicer.modules.markups.logic().JumpSlicesToLocation(ras[0], ras[1], ras[2], True)
 
     def visualize_topology(self, frameTopology):
-        logging.info('Visualizing Z-frame topology.')
+        logging.info('Visualizing Z-frame topology with Lines and Labeled Points.')
         frameTopologyArr = []
         try:
+            # トポロジー文字列のパース
             frameTopologyList = ''.join(frameTopology.split()).strip("[]").split("],[")
             for n in frameTopologyList:
                 x, y, z = map(float, n.split(","))
                 frameTopologyArr.append([x, y, z])
         except ValueError:
+            slicer.util.errorDisplay("Topology format error.")
             return
 
+        # 始点とベクトルを取得
         origins = frameTopologyArr[0:3]
         vectors = frameTopologyArr[3:6]
-        endpoints = [list(np.array(o) + np.array(v)) for o, v in zip(origins, vectors)]
-        points_to_draw = origins + endpoints
         
-        fiducialNode = slicer.mrmlScene.GetFirstNodeByName("Z-Frame Topology Points")
-        if not fiducialNode:
-            fiducialNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Z-Frame Topology Points")
+        # ---------------------------------------------------------
+        # 1. 線を描画するためのモデルノード (Z-Frame Topology Lines)
+        # ---------------------------------------------------------
+        vtk_points_lines = vtk.vtkPoints()
+        vtk_lines = vtk.vtkCellArray()
         
-        fiducialNode.RemoveAllControlPoints()
-        point_labels = ["Org1", "Org2", "Org3", "Vec1", "Vec2", "Vec3"]
-        for i, point in enumerate(points_to_draw):
-            fiducialNode.AddControlPoint(vtk.vtkVector3d(point), point_labels[i])
+        pid = 0
+        for o, v in zip(origins, vectors):
+            start_pt = np.array(o)
+            end_pt = np.array(o) + np.array(v)
+            
+            # 線の座標を追加
+            vtk_points_lines.InsertNextPoint(start_pt)
+            vtk_points_lines.InsertNextPoint(end_pt)
+            
+            # 線を作成
+            line = vtk.vtkLine()
+            line.GetPointIds().SetId(0, pid)
+            line.GetPointIds().SetId(1, pid + 1)
+            vtk_lines.InsertNextCell(line)
+            pid += 2
+
+        polyData = vtk.vtkPolyData()
+        polyData.SetPoints(vtk_points_lines)
+        polyData.SetLines(vtk_lines)
+
+        lineNodeName = "Z-Frame Topology Lines"
+        lineModelNode = slicer.mrmlScene.GetFirstNodeByName(lineNodeName)
+        if not lineModelNode:
+            lineModelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", lineNodeName)
+            lineModelNode.CreateDefaultDisplayNodes()
+            
+        lineModelNode.SetAndObservePolyData(polyData)
         
-        displayNode = fiducialNode.GetDisplayNode()
-        if displayNode:
-            displayNode.SetSelectedColor(1, 0, 0) # Red
-            displayNode.SetGlyphScale(2.0)
-            displayNode.SetTextScale(2.0)
+        # 線の色を「赤」に設定
+        lineDisplayNode = lineModelNode.GetDisplayNode()
+        if lineDisplayNode:
+            lineDisplayNode.SetColor(1, 0, 0)  # 赤 (Red)
+            lineDisplayNode.SetLineWidth(4.0)
+            lineDisplayNode.SetOpacity(1.0)
+
+        # ---------------------------------------------------------
+        # 2. 名前付きの点を表示するためのマークアップノード (Z-Frame Topology Points)
+        # ---------------------------------------------------------
+        pointsNodeName = "Z-Frame Topology Points"
+        markupsNode = slicer.mrmlScene.GetFirstNodeByName(pointsNodeName)
+        if not markupsNode:
+            markupsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", pointsNodeName)
+        
+        markupsNode.RemoveAllControlPoints()
+        markupsNode.GetDisplayNode().SetSelectedColor(1, 0, 0) # 赤 (Selected)
+        markupsNode.GetDisplayNode().SetColor(1, 0, 0)         # 赤 (Unselected)
+        markupsNode.GetDisplayNode().SetTextScale(4.0)         # 文字サイズ
+        markupsNode.GetDisplayNode().SetGlyphScale(3.0)        # 点のサイズ
+        
+        # 点を追加し、名前（ラベル）をつける
+        # Zフレームのロッドは3本あるので、それぞれの始点(Start)と終点(End)に名前をつけます
+        for i, (o, v) in enumerate(zip(origins, vectors)):
+            start_pt = np.array(o)
+            end_pt = np.array(o) + np.array(v)
+            
+            # 始点 (例: Rod1-Start)
+            markupsNode.AddControlPoint(vtk.vtkVector3d(start_pt), f"Rod{i+1}-Start")
+            
+            # 終点 (例: Rod1-End)
+            markupsNode.AddControlPoint(vtk.vtkVector3d(end_pt), f"Rod{i+1}-End")
+
+        print(f"Created topology visualization: Lines and Labeled Points (Red)")
