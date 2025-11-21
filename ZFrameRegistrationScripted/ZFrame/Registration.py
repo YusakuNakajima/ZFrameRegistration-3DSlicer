@@ -1225,24 +1225,18 @@ class ZFrameRegistration:
     def SolveZ(self, P1, P2, P3, Oz, Vz, fiducialDistance):
         """Find the point at which the diagonal line fiducial is intercepted.
         
-        Uses the three intercepts for a single set of planar line fiducials
-        contained in one side of the Z-frame.
-        
-        Args:
-            P1 (numpy.ndarray): Intercept point of first line fiducial in image
-            P2 (numpy.ndarray): Intercept point of second line fiducial in image
-            P3 (numpy.ndarray): Intercept point of third line fiducial in image
-            Oz (numpy.ndarray): Origin of this side of the Z-frame, in Z-frame coordinates
-            Vz (numpy.ndarray): Vector representing orientation of this side of Z-frame
-            fiducialDistance (float): Distance between parallel fiducials (used to calculate diagonal length)
-            
-        Returns:
-            numpy.ndarray: Diagonal intercept in physical Z-frame coordinates (P2f),
-                        or None if computation fails
+        修正版: トポロジーベクトルの実際の長さを使用して計算します。
         """
         try:
-            # Normalize the direction vector of the diagonal fiducial
-            Vz = Vz / np.linalg.norm(Vz)
+            # 修正: ベクトルの正規化の前に、本来の長さ（対角線の長さ）を取得する
+            # 以前のコード: Ld = fiducialDistance * np.sqrt(2.0) (45度固定のバグ)
+            
+            # Vzはトポロジーから来たベクトル（例: [0, -12, 80]）なので、
+            # そのノルム（長さ）がそのまま斜め棒の物理的な長さになります。
+            diagonalLength = np.linalg.norm(Vz)
+            
+            # 方向ベクトルの正規化
+            Vz_normalized = Vz / diagonalLength
             
             # Compute distances between points
             D12 = np.linalg.norm(P1 - P2)
@@ -1252,14 +1246,15 @@ class ZFrameRegistration:
                 print("Registration::SolveZ - Division by zero in distance calculation.")
                 return None
                 
-            # Length of diagonal - Diagonal distance between parallel fiducials
-            Ld = fiducialDistance * np.sqrt(2.0)
+            # 修正: 計算した実際の長さを使用
+            Ld = diagonalLength
             
             # Compute intercept length
             Lc = Ld * D23 / (D12 + D23)
             
             # Compute P2 in frame coordinates
-            P2f = Oz + Vz * Lc
+            # 正規化したベクトルに距離Lcを掛ける
+            P2f = Oz + Vz_normalized * Lc
             
             return P2f
             
