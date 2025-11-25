@@ -244,7 +244,7 @@ class ZFrameRegistration:
         n = 0
         T = np.zeros((4, 4))  # Symmetric matrix for quaternion averaging
         P = np.zeros(3)  # Position accumulator
-        all_detected_points = [] # 検出点保存用
+        all_detected_points = [] # For storing detected points
 
         # Create transformation matrix
         matrix = np.eye(4)
@@ -254,7 +254,7 @@ class ZFrameRegistration:
         
         # Process each slice in range
         print(f"Processing slices from {sliceRange[0]} to {sliceRange[1]}")
-        # ★全スライスを処理
+        # ★Process all slices
         for slindex in range(sliceRange[0], sliceRange[1]):
             print(f"=== Current Slice Index: {slindex} ===")
             # Calculate image center offset
@@ -275,7 +275,7 @@ class ZFrameRegistration:
             if 0 <= slindex < zsize:
                 current_slice = self.InputImage[:, :, slindex]
             else:
-                # ★戻り値を4つに合わせる
+                # ★Match the return value to 4
                 return False, None, None, []
             
             # Initialize for this slice
@@ -293,7 +293,7 @@ class ZFrameRegistration:
                 T += np.outer(q, q)
                 n += 1
                 
-                # 成功したスライスの検出座標をリストに保存
+                # Save the detection coordinates of the successful slice to the list
                 if self.lastDetectedCoordinates:
                     all_detected_points.append({
                         "slice": slindex,
@@ -340,7 +340,7 @@ class ZFrameRegistration:
             # Convert back to quaternion
             Zorientation = zf.MatrixToQuaternion(new_transform)
         
-        # ★全検出点を返す
+        # ★Return all detected points
         return True, Zposition, Zorientation, all_detected_points
 
     def Init(self, xsize, ysize):
@@ -1223,19 +1223,19 @@ class ZFrameRegistration:
             return Zposition, Zorientation
 
     def SolveZ(self, P1, P2, P3, Oz, Vz, fiducialDistance):
-        """Find the point at which the diagonal line fiducial is intercepted.
+        """
         
-        修正版: トポロジーベクトルの実際の長さを使用して計算します。
+        # Revised version: Calculate using the actual length of the topology vector.
         """
         try:
-            # 修正: ベクトルの正規化の前に、本来の長さ（対角線の長さ）を取得する
-            # 以前のコード: Ld = fiducialDistance * np.sqrt(2.0) (45度固定のバグ)
+            # Correction: Get the original length (diagonal length) before normalizing the vector
+            # Previous code: Ld = fiducialDistance * np.sqrt(2.0) (45 degree fixed bug)
             
-            # Vzはトポロジーから来たベクトル（例: [0, -12, 80]）なので、
-            # そのノルム（長さ）がそのまま斜め棒の物理的な長さになります。
+            # Vz is a vector from the topology (e.g., [0, -12, 80]), so
+            # its norm (length) is the physical length of the diagonal bar.
             diagonalLength = np.linalg.norm(Vz)
             
-            # 方向ベクトルの正規化
+            # Normalize direction vector
             Vz_normalized = Vz / diagonalLength
             
             # Compute distances between points
@@ -1246,14 +1246,14 @@ class ZFrameRegistration:
                 print("Registration::SolveZ - Division by zero in distance calculation.")
                 return None
                 
-            # 修正: 計算した実際の長さを使用
+            # Correction: Use the calculated actual length
             Ld = diagonalLength
             
             # Compute intercept length
             Lc = Ld * D23 / (D12 + D23)
             
             # Compute P2 in frame coordinates
-            # 正規化したベクトルに距離Lcを掛ける
+            # Multiply the normalized vector by the distance Lc
             P2f = Oz + Vz_normalized * Lc
             
             return P2f

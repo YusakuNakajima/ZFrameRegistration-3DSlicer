@@ -101,7 +101,7 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.sliceRangeWidget.singleStep = 1
         parametersFormLayout.addRow("Slice Range: ", self.sliceRangeWidget)
 
-        # Visualization Step (間引き表示用)
+        # Visualization Step (for decimation)
         self.visStepSpinBox = qt.QSpinBox()
         self.visStepSpinBox.setRange(1, 100)
         self.visStepSpinBox.setValue(1)
@@ -275,7 +275,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             
             result, Zposition, Zorientation, all_detected_points = registration.Register(sliceRange)
         
-        # --- 検出点の可視化 ---
+        # --- Visualization of detected points ---
         if visualize and all_detected_points:
             points_to_visualize = all_detected_points[::visualizeStep]
             print(f"Visualizing points for {len(points_to_visualize)} slices (Step: {visualizeStep})")
@@ -317,7 +317,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         markupsNode.RemoveAllControlPoints()
         markupsNode.GetDisplayNode().SetSelectedColor(0, 1, 0) # Green
         
-        # ★サイズをハードコード (5.0)
+        # ★Hardcoded size (5.0)
         markupsNode.GetDisplayNode().SetTextScale(3.0) 
         markupsNode.GetDisplayNode().SetGlyphScale(3.0)
         
@@ -349,7 +349,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         logging.info('Visualizing Z-frame topology with Lines and Labeled Points.')
         frameTopologyArr = []
         try:
-            # トポロジー文字列のパース
+            # Parse topology string
             frameTopologyList = ''.join(frameTopology.split()).strip("[]").split("],[")
             for n in frameTopologyList:
                 x, y, z = map(float, n.split(","))
@@ -358,12 +358,12 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             slicer.util.errorDisplay("Topology format error.")
             return
 
-        # 始点とベクトルを取得
+        # Get origins and vectors
         origins = frameTopologyArr[0:3]
         vectors = frameTopologyArr[3:6]
         
         # ---------------------------------------------------------
-        # 1. 線を描画するためのモデルノード (Z-Frame Topology Lines)
+        # 1. Model node for drawing lines (Z-Frame Topology Lines)
         # ---------------------------------------------------------
         vtk_points_lines = vtk.vtkPoints()
         vtk_lines = vtk.vtkCellArray()
@@ -373,11 +373,11 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             start_pt = np.array(o)
             end_pt = np.array(o) + np.array(v)
             
-            # 線の座標を追加
+            # Add line coordinates
             vtk_points_lines.InsertNextPoint(start_pt)
             vtk_points_lines.InsertNextPoint(end_pt)
             
-            # 線を作成
+            # Create line
             line = vtk.vtkLine()
             line.GetPointIds().SetId(0, pid)
             line.GetPointIds().SetId(1, pid + 1)
@@ -396,7 +396,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             
         lineModelNode.SetAndObservePolyData(polyData)
         
-        # 線の色を「赤」に設定
+        # Set line color to "Red"
         lineDisplayNode = lineModelNode.GetDisplayNode()
         if lineDisplayNode:
             lineDisplayNode.SetColor(1, 0, 0)  # 赤 (Red)
@@ -404,7 +404,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             lineDisplayNode.SetOpacity(1.0)
 
         # ---------------------------------------------------------
-        # 2. 名前付きの点を表示するためのマークアップノード (Z-Frame Topology Points)
+        # 2. Markup node for displaying named points (Z-Frame Topology Points)
         # ---------------------------------------------------------
         pointsNodeName = "Z-Frame Topology Points"
         markupsNode = slicer.mrmlScene.GetFirstNodeByName(pointsNodeName)
@@ -412,21 +412,21 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             markupsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", pointsNodeName)
         
         markupsNode.RemoveAllControlPoints()
-        markupsNode.GetDisplayNode().SetSelectedColor(1, 0, 0) # 赤 (Selected)
-        markupsNode.GetDisplayNode().SetColor(1, 0, 0)         # 赤 (Unselected)
-        markupsNode.GetDisplayNode().SetTextScale(4.0)         # 文字サイズ
-        markupsNode.GetDisplayNode().SetGlyphScale(3.0)        # 点のサイズ
+        markupsNode.GetDisplayNode().SetSelectedColor(1, 0, 0) # Red (Selected)
+        markupsNode.GetDisplayNode().SetColor(1, 0, 0)         # Red (Unselected)
+        markupsNode.GetDisplayNode().SetTextScale(4.0)         # Text size
+        markupsNode.GetDisplayNode().SetGlyphScale(3.0)        # Point size
         
-        # 点を追加し、名前（ラベル）をつける
-        # Zフレームのロッドは3本あるので、それぞれの始点(Start)と終点(End)に名前をつけます
+        # Add points and give them names (labels)
+        # There are 3 rods in the Z-frame, so name the start and end points of each.
         for i, (o, v) in enumerate(zip(origins, vectors)):
             start_pt = np.array(o)
             end_pt = np.array(o) + np.array(v)
             
-            # 始点 (例: Rod1-Start)
+            # Start point (e.g., Rod1-Start)
             markupsNode.AddControlPoint(vtk.vtkVector3d(start_pt), f"Rod{i+1}-Start")
             
-            # 終点 (例: Rod1-End)
+            # End point (e.g., Rod1-End)
             markupsNode.AddControlPoint(vtk.vtkVector3d(end_pt), f"Rod{i+1}-End")
 
         print(f"Created topology visualization: Lines and Labeled Points (Red)")
