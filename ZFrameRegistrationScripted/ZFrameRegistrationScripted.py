@@ -108,6 +108,13 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.visStepSpinBox.setToolTip("Reduce clutter by skipping slices during visualization.")
         parametersFormLayout.addRow("Visualization Step: ", self.visStepSpinBox)
 
+        # Marker Diameter Setting
+        self.markerDiameterSpinBox = qt.QSpinBox()
+        self.markerDiameterSpinBox.setRange(3, 100)
+        self.markerDiameterSpinBox.setValue(11) 
+        self.markerDiameterSpinBox.setToolTip("Diameter of the fiducial marker in pixels.")
+        parametersFormLayout.addRow("Marker Diameter (px): ", self.markerDiameterSpinBox)
+
         self.onInputVolumeSelected(self.inputSelector.currentNode())
         
         # Output transform selector
@@ -127,23 +134,32 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         actionsLayout = qt.QVBoxLayout()
         parametersFormLayout.addRow(actionsLayout)
         
+        # Common Button Style: Bold, 13px size, Padding
+        baseButtonStyle = "font-weight: bold; font-size: 13px; padding: 6px;"
+
         # 1. Apply Only Button
         self.applyButton = qt.QPushButton("Run Registration")
-        self.applyButton.setToolTip("Run registration without visualizing points (Faster).")
-        self.applyButton.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.applyButton.setToolTip("Run registration (Compute transform).")
+        # Standard Style
+        self.applyButton.setStyleSheet(baseButtonStyle)
         self.applyButton.enabled = True
         actionsLayout.addWidget(self.applyButton)
         
-        # 2. Apply & Visualize Button
-        self.applyVisButton = qt.QPushButton("Run & Visualize Points")
-        self.applyVisButton.setToolTip("Run registration and visualize detected points (Good for debugging).")
-        self.applyVisButton.setStyleSheet("font-weight: bold; padding: 6px; color: #2e5e2e;")
+        # 2. Visualize Button
+        # Changed Name: "Visualize Detected Points" (Clearer)
+        self.applyVisButton = qt.QPushButton("Visualize Detected Points")
+        self.applyVisButton.setToolTip("Detect and visualize points ONLY (Does not update transform).")
+        # Green Text to match Green Points
+        self.applyVisButton.setStyleSheet(baseButtonStyle + " color: #00aa00;")
         self.applyVisButton.enabled = True
         actionsLayout.addWidget(self.applyVisButton)
         
         # 3. Visualize Topology Button
-        self.visualizeButton = qt.QPushButton("Visualize Topology")
+        # Changed Name: "Visualize Frame Topology" (Matches Detected Points structure)
+        self.visualizeButton = qt.QPushButton("Visualize Frame Topology")
         self.visualizeButton.toolTip = "Visualize the Z-frame topology definition."
+        # Red Text to match Red Topology Lines
+        self.visualizeButton.setStyleSheet(baseButtonStyle + " color: #d60000;")
         self.visualizeButton.enabled = True
         actionsLayout.addWidget(self.visualizeButton)
 
@@ -197,12 +213,14 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.frameTopologyTextEdit.setText(self.zFrameTopologies.get(configName, "Unknown configuration"))
 
     def onApplyButton(self):
-        self.runRegistration(visualize=False)
+        # Run Registration: No Visualization, Update Transform = True
+        self.runRegistration(visualize=False, updateTransform=True)
 
     def onApplyVisButton(self):
-        self.runRegistration(visualize=True)
+        # Visualize Only: Visualization, Update Transform = False
+        self.runRegistration(visualize=True, updateTransform=False)
 
-    def runRegistration(self, visualize):
+    def runRegistration(self, visualize, updateTransform=True):
         try:
             self.logic.run(self.inputSelector.currentNode(),
                      self.outputSelector.currentNode(),
@@ -212,14 +230,16 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
                      int(self.sliceRangeWidget.minimumValue),
                      int(self.sliceRangeWidget.maximumValue),
                      visualize=visualize,
-                     visualizeStep=int(self.visStepSpinBox.value))
+                     visualizeStep=int(self.visStepSpinBox.value),
+                     markerDiameter=int(self.markerDiameterSpinBox.value),
+                     updateTransform=updateTransform)
         except Exception as e:
             slicer.util.errorDisplay("Failed to compute results: "+str(e))
             import traceback
             traceback.print_exc()
 
 class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
-    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1):
+    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1, markerDiameter=11, updateTransform=True):
         logging.info('Processing started')
         
         if not inputVolume or not outputTransform:
@@ -269,6 +289,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         all_detected_points = []
 
         if registration:
+            registration.SetMarkerDiameter(markerDiameter)
             registration.SetInputImage(imageDataArr, imageTransform)
             registration.SetOrientationBase(ZquaternionBase)
             registration.SetFrameTopology(frameTopologyArr)
@@ -280,11 +301,9 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             points_to_visualize = all_detected_points[::visualizeStep]
             print(f"Visualizing points for {len(points_to_visualize)} slices (Step: {visualizeStep})")
             self.visualize_detected_points(inputVolume, points_to_visualize)
-        elif not visualize:
-            self.clear_detected_points_visualization()
         # -----------------------
 
-        if result:
+        if result and updateTransform:
             matrix = zf.QuaternionToMatrix(Zorientation)
             zMatrix = vtk.vtkMatrix4x4()
             for i in range(3):
@@ -294,6 +313,9 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             
             outputTransform.SetMatrixTransformToParent(zMatrix)
             logging.info('Processing completed')
+            return True
+        elif result and not updateTransform:
+            logging.info('Detection completed (Transform update skipped)')
             return True
         else:
             logging.error('Processing failed')
@@ -317,7 +339,6 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         markupsNode.RemoveAllControlPoints()
         markupsNode.GetDisplayNode().SetSelectedColor(0, 1, 0) # Green
         
-        # ★Hardcoded size (5.0)
         markupsNode.GetDisplayNode().SetTextScale(3.0) 
         markupsNode.GetDisplayNode().SetGlyphScale(3.0)
         
