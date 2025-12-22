@@ -17,7 +17,7 @@ class ZFrameRegistrationScripted(ScriptedLoadableModule):
         self.parent.dependencies = []
         self.parent.contributors = ["Yusaku Nakajima"]
         self.parent.helpText = """
-            This module performs Z-frame registration.
+            This module performs Z-frame registration with selectable orientation.
             """
         self.parent.acknowledgementText = """ """
         for iconExtension in ['.svg', '.png']:
@@ -72,6 +72,13 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         parametersFormLayout.addRow("Input Volume: ", self.inputSelector)
         self.inputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onInputVolumeSelected)
 
+        # Orientation Selector (New)
+        self.orientationSelector = qt.QComboBox()
+        self.orientationSelector.addItems(["Axial (Red)", "Coronal (Green)", "Sagittal (Yellow)"])
+        self.orientationSelector.setToolTip("Select the slice orientation where Z-frame dots are visible.")
+        parametersFormLayout.addRow("Detection Orientation: ", self.orientationSelector)
+        self.orientationSelector.connect("currentIndexChanged(int)", self.onOrientationChanged)
+
         # Fiducial type selector
         self.fiducialTypeSelector = qt.QComboBox()
         self.fiducialTypeSelector.addItems(["7-fiducial", "9-fiducial"])
@@ -115,6 +122,7 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.markerDiameterSpinBox.setToolTip("Diameter of the fiducial marker in pixels.")
         parametersFormLayout.addRow("Marker Diameter (px): ", self.markerDiameterSpinBox)
 
+        # Initialize UI state
         self.onInputVolumeSelected(self.inputSelector.currentNode())
         
         # Output transform selector
@@ -134,31 +142,22 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         actionsLayout = qt.QVBoxLayout()
         parametersFormLayout.addRow(actionsLayout)
         
-        # Common Button Style: Bold, 13px size, Padding
         baseButtonStyle = "font-weight: bold; font-size: 13px; padding: 6px;"
 
-        # 1. Apply Only Button
         self.applyButton = qt.QPushButton("Run Registration")
         self.applyButton.setToolTip("Run registration (Compute transform).")
-        # Standard Style
         self.applyButton.setStyleSheet(baseButtonStyle)
         self.applyButton.enabled = True
         actionsLayout.addWidget(self.applyButton)
         
-        # 2. Visualize Button
-        # Changed Name: "Visualize Detected Points" (Clearer)
         self.applyVisButton = qt.QPushButton("Visualize Detected Points")
         self.applyVisButton.setToolTip("Detect and visualize points ONLY (Does not update transform).")
-        # Green Text to match Green Points
         self.applyVisButton.setStyleSheet(baseButtonStyle + " color: #00aa00;")
         self.applyVisButton.enabled = True
         actionsLayout.addWidget(self.applyVisButton)
         
-        # 3. Visualize Topology Button
-        # Changed Name: "Visualize Frame Topology" (Matches Detected Points structure)
         self.visualizeButton = qt.QPushButton("Visualize Frame Topology")
         self.visualizeButton.toolTip = "Visualize the Z-frame topology definition."
-        # Red Text to match Red Topology Lines
         self.visualizeButton.setStyleSheet(baseButtonStyle + " color: #d60000;")
         self.visualizeButton.enabled = True
         actionsLayout.addWidget(self.visualizeButton)
@@ -179,13 +178,29 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
             traceback.print_exc()
 
     def onInputVolumeSelected(self, node):
+        self.onOrientationChanged(self.orientationSelector.currentIndex)
+
+    def onOrientationChanged(self, index):
+        # Update slice range based on selected orientation
+        node = self.inputSelector.currentNode()
         if node:
             dims = node.GetImageData().GetDimensions()
-            num_slices = dims[2]
-            self.sliceRangeWidget.maximum = num_slices
+            # dims are (I, J, K)
+            
+            orientation = self.orientationSelector.currentText
+            max_slice = 0
+            
+            if "Axial" in orientation:
+                max_slice = dims[2] # K
+            elif "Coronal" in orientation:
+                max_slice = dims[1] # J
+            elif "Sagittal" in orientation:
+                max_slice = dims[0] # I
+                
+            self.sliceRangeWidget.maximum = max_slice
             self.sliceRangeWidget.minimum = 0
             self.sliceRangeWidget.minimumValue = 0
-            self.sliceRangeWidget.maximumValue = num_slices
+            self.sliceRangeWidget.maximumValue = max_slice
 
     def loadZFrameConfigs(self):
         configPath = os.path.join(os.path.dirname(__file__), 'Resources', 'configs.txt')
@@ -213,11 +228,9 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.frameTopologyTextEdit.setText(self.zFrameTopologies.get(configName, "Unknown configuration"))
 
     def onApplyButton(self):
-        # Run Registration: No Visualization, Update Transform = True
         self.runRegistration(visualize=False, updateTransform=True)
 
     def onApplyVisButton(self):
-        # Visualize Only: Visualization, Update Transform = False
         self.runRegistration(visualize=True, updateTransform=False)
 
     def runRegistration(self, visualize, updateTransform=True):
@@ -232,14 +245,15 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
                      visualize=visualize,
                      visualizeStep=int(self.visStepSpinBox.value),
                      markerDiameter=int(self.markerDiameterSpinBox.value),
-                     updateTransform=updateTransform)
+                     updateTransform=updateTransform,
+                     orientation=self.orientationSelector.currentText)
         except Exception as e:
             slicer.util.errorDisplay("Failed to compute results: "+str(e))
             import traceback
             traceback.print_exc()
 
 class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
-    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1, markerDiameter=11, updateTransform=True):
+    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1, markerDiameter=11, updateTransform=True, orientation="Axial"):
         logging.info('Processing started')
         
         if not inputVolume or not outputTransform:
@@ -250,19 +264,74 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             raise ValueError("Input image is invalid")
         
         dim = imageData.GetDimensions()
+        # vtk_to_numpy returns flat array. reshape to (K, J, I).
+        # Note: numpy shape is (z, y, x) corresponding to (K, J, I)
         imageDataArr = vtk.util.numpy_support.vtk_to_numpy(imageData.GetPointData().GetScalars())
-        imageDataArr = imageDataArr.reshape(dim[2], dim[1], dim[0]).transpose(2,1,0)
-
+        imageDataArr = imageDataArr.reshape(dim[2], dim[1], dim[0]) 
+        
+        # Original code for Axial: (K, J, I) -> transpose(2, 1, 0) -> (I, J, K)
+        # We need the last dimension to be the slicing direction.
+        # Input to ZFrameRegistration is expected to be [ImageX, ImageY, SliceIndex]
+        
         origin = inputVolume.GetOrigin()
         spacing = inputVolume.GetSpacing()
         directions = vtk.vtkMatrix4x4()
         inputVolume.GetIJKToRASDirectionMatrix(directions)
 
+        # Base imageTransform construction (I, J, K columns)
         imageTransform = np.eye(4)
         for i in range(3):
             for j in range(3):
                 imageTransform[i,j] = spacing[j] * directions.GetElement(i,j)
             imageTransform[i,3] = origin[i]
+
+        # --- Handle Orientation Swapping ---
+        # 1. Permute imageDataArr so dim 2 is the slice axis.
+        # 2. Permute imageTransform columns so they match the new (ImageX, ImageY, Slice) axes.
+        
+        if "Axial" in orientation:
+            # (K, J, I) -> (I, J, K)
+            # ImageX=I, ImageY=J, Slice=K
+            imageDataArr = imageDataArr.transpose(2,1,0)
+            # Matrix columns: 0=I, 1=J, 2=K (No change)
+            
+        elif "Coronal" in orientation:
+            # Slicer Green: Slice along J axis.
+            # Slice Plane is I-K (X-Z). Usually ImageX=I, ImageY=K.
+            # Original Array: (K, J, I)
+            # Target: (I, K, J)
+            # Transpose: (2, 0, 1) relative to original (K, J, I) 
+            # Wait: dim 2 is I, dim 0 is K, dim 1 is J.
+            imageDataArr = imageDataArr.transpose(2, 0, 1)
+            
+            # Matrix Permutation:
+            # New Col 0 (ImageX) <- Old Col 0 (I)
+            # New Col 1 (ImageY) <- Old Col 2 (K)
+            # New Col 2 (Slice)  <- Old Col 1 (J)
+            original_matrix = imageTransform.copy()
+            imageTransform[:, 0] = original_matrix[:, 0] # I
+            imageTransform[:, 1] = original_matrix[:, 2] # K
+            imageTransform[:, 2] = original_matrix[:, 1] # J
+
+        elif "Sagittal" in orientation:
+            # Slicer Yellow: Slice along I axis.
+            # Slice Plane is J-K (Y-Z). Usually ImageX=J, ImageY=K.
+            # Original Array: (K, J, I)
+            # Target: (J, K, I)
+            # Transpose: (1, 0, 2) relative to original (K, J, I)
+            # dim 1 is J, dim 0 is K, dim 2 is I.
+            imageDataArr = imageDataArr.transpose(1, 0, 2)
+            
+            # Matrix Permutation:
+            # New Col 0 (ImageX) <- Old Col 1 (J)
+            # New Col 1 (ImageY) <- Old Col 2 (K)
+            # New Col 2 (Slice)  <- Old Col 0 (I)
+            original_matrix = imageTransform.copy()
+            imageTransform[:, 0] = original_matrix[:, 1] # J
+            imageTransform[:, 1] = original_matrix[:, 2] # K
+            imageTransform[:, 2] = original_matrix[:, 0] # I
+
+        # -----------------------------------
 
         ZmatrixBase = np.eye(4)
         ZquaternionBase = zf.MatrixToQuaternion(ZmatrixBase)
@@ -300,7 +369,8 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         if visualize and all_detected_points:
             points_to_visualize = all_detected_points[::visualizeStep]
             print(f"Visualizing points for {len(points_to_visualize)} slices (Step: {visualizeStep})")
-            self.visualize_detected_points(inputVolume, points_to_visualize)
+            # Pass orientation to visualize function to map coordinates back correctly
+            self.visualize_detected_points(inputVolume, points_to_visualize, orientation)
         # -----------------------
 
         if result and updateTransform:
@@ -327,9 +397,10 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         if markupsNode:
             markupsNode.RemoveAllControlPoints()
 
-    def visualize_detected_points(self, inputVolume, points_list):
+    def visualize_detected_points(self, inputVolume, points_list, orientation="Axial"):
         """
         points_list: [{"slice": int, "points": [[x,y],...]}, ...]
+        orientation: "Axial", "Coronal", or "Sagittal"
         """
         nodeName = "Detected Z-Frame Points"
         markupsNode = slicer.mrmlScene.GetFirstNodeByName(nodeName)
@@ -342,7 +413,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         markupsNode.GetDisplayNode().SetTextScale(3.0) 
         markupsNode.GetDisplayNode().SetGlyphScale(3.0)
         
-        # IJK to RAS Matrix
+        # IJK to RAS Matrix (This expects original IJK)
         ijkToRas = vtk.vtkMatrix4x4()
         inputVolume.GetIJKToRASMatrix(ijkToRas)
         
@@ -351,7 +422,19 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             points = item["points"]
             
             for i, pt in enumerate(points):
-                ijk = [pt[0], pt[1], slice_idx, 1.0]
+                # Map algorithm coordinates back to Volume IJK based on orientation
+                if "Axial" in orientation:
+                    # Alg: X=I, Y=J, Z=K
+                    ijk = [pt[0], pt[1], slice_idx, 1.0]
+                elif "Coronal" in orientation:
+                    # Alg: X=I, Y=K, Z=J
+                    # Volume IJK: I=pt[0], J=slice_idx, K=pt[1]
+                    ijk = [pt[0], slice_idx, pt[1], 1.0]
+                elif "Sagittal" in orientation:
+                    # Alg: X=J, Y=K, Z=I
+                    # Volume IJK: I=slice_idx, J=pt[0], K=pt[1]
+                    ijk = [slice_idx, pt[0], pt[1], 1.0]
+                
                 ras = [0.0]*4
                 ijkToRas.MultiplyPoint(ijk, ras)
                 
@@ -359,9 +442,18 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
                 markupsNode.AddControlPoint(vtk.vtkVector3d(ras[0], ras[1], ras[2]), label)
             
         if points_list:
-             last_pt = points_list[-1]["points"][0]
-             last_slice = points_list[-1]["slice"]
-             ijk = [last_pt[0], last_pt[1], last_slice, 1.0]
+             # Jump to the last detected point
+             last_item = points_list[-1]
+             last_slice = last_item["slice"]
+             last_pt = last_item["points"][0]
+             
+             if "Axial" in orientation:
+                 ijk = [last_pt[0], last_pt[1], last_slice, 1.0]
+             elif "Coronal" in orientation:
+                 ijk = [last_pt[0], last_slice, last_pt[1], 1.0]
+             elif "Sagittal" in orientation:
+                 ijk = [last_slice, last_pt[0], last_pt[1], 1.0]
+                 
              ras = [0.0]*4
              ijkToRas.MultiplyPoint(ijk, ras)
              slicer.modules.markups.logic().JumpSlicesToLocation(ras[0], ras[1], ras[2], True)
@@ -383,9 +475,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         origins = frameTopologyArr[0:3]
         vectors = frameTopologyArr[3:6]
         
-        # ---------------------------------------------------------
-        # 1. Model node for drawing lines (Z-Frame Topology Lines)
-        # ---------------------------------------------------------
+        # 1. Model node for drawing lines
         vtk_points_lines = vtk.vtkPoints()
         vtk_lines = vtk.vtkCellArray()
         
@@ -420,34 +510,26 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         # Set line color to "Red"
         lineDisplayNode = lineModelNode.GetDisplayNode()
         if lineDisplayNode:
-            lineDisplayNode.SetColor(1, 0, 0)  # 赤 (Red)
+            lineDisplayNode.SetColor(1, 0, 0)
             lineDisplayNode.SetLineWidth(4.0)
             lineDisplayNode.SetOpacity(1.0)
 
-        # ---------------------------------------------------------
-        # 2. Markup node for displaying named points (Z-Frame Topology Points)
-        # ---------------------------------------------------------
+        # 2. Markup node for displaying named points
         pointsNodeName = "Z-Frame Topology Points"
         markupsNode = slicer.mrmlScene.GetFirstNodeByName(pointsNodeName)
         if not markupsNode:
             markupsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", pointsNodeName)
         
         markupsNode.RemoveAllControlPoints()
-        markupsNode.GetDisplayNode().SetSelectedColor(1, 0, 0) # Red (Selected)
-        markupsNode.GetDisplayNode().SetColor(1, 0, 0)         # Red (Unselected)
-        markupsNode.GetDisplayNode().SetTextScale(4.0)         # Text size
-        markupsNode.GetDisplayNode().SetGlyphScale(3.0)        # Point size
+        markupsNode.GetDisplayNode().SetSelectedColor(1, 0, 0)
+        markupsNode.GetDisplayNode().SetColor(1, 0, 0)
+        markupsNode.GetDisplayNode().SetTextScale(4.0)
+        markupsNode.GetDisplayNode().SetGlyphScale(3.0)
         
-        # Add points and give them names (labels)
-        # There are 3 rods in the Z-frame, so name the start and end points of each.
         for i, (o, v) in enumerate(zip(origins, vectors)):
             start_pt = np.array(o)
             end_pt = np.array(o) + np.array(v)
-            
-            # Start point (e.g., Rod1-Start)
             markupsNode.AddControlPoint(vtk.vtkVector3d(start_pt), f"Rod{i+1}-Start")
-            
-            # End point (e.g., Rod1-End)
             markupsNode.AddControlPoint(vtk.vtkVector3d(end_pt), f"Rod{i+1}-End")
 
         print(f"Created topology visualization: Lines and Labeled Points (Red)")
