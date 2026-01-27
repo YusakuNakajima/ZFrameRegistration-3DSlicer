@@ -118,7 +118,7 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         # Marker Diameter Setting
         self.markerDiameterSpinBox = qt.QSpinBox()
         self.markerDiameterSpinBox.setRange(3, 100)
-        self.markerDiameterSpinBox.setValue(11) 
+        self.markerDiameterSpinBox.setValue(5) 
         self.markerDiameterSpinBox.setToolTip("Diameter of the fiducial marker in pixels.")
         parametersFormLayout.addRow("Marker Diameter (px): ", self.markerDiameterSpinBox)
 
@@ -166,8 +166,59 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.applyButton.connect('clicked(bool)', self.onApplyButton)
         self.applyVisButton.connect('clicked(bool)', self.onApplyVisButton)
         self.visualizeButton.connect('clicked(bool)', self.onVisualizeButton)
-        
+
+        # --- Auto Orient (Pre-processing) ---
+        autoOrientCollapsibleButton = ctk.ctkCollapsibleButton()
+        autoOrientCollapsibleButton.text = "Auto Orient (Pre-processing)"
+        autoOrientCollapsibleButton.collapsed = True
+        self.layout.addWidget(autoOrientCollapsibleButton)
+        autoOrientFormLayout = qt.QFormLayout(autoOrientCollapsibleButton)
+
+        self.orientTransformSelector = slicer.qMRMLNodeComboBox()
+        self.orientTransformSelector.nodeTypes = ["vtkMRMLLinearTransformNode"]
+        self.orientTransformSelector.selectNodeUponCreation = True
+        self.orientTransformSelector.addEnabled = True
+        self.orientTransformSelector.removeEnabled = True
+        self.orientTransformSelector.noneEnabled = True
+        self.orientTransformSelector.showHidden = False
+        self.orientTransformSelector.showChildNodeTypes = False
+        self.orientTransformSelector.setMRMLScene(slicer.mrmlScene)
+        self.orientTransformSelector.setToolTip("Output transform for auto-orientation. Crop the volume to the Z-frame region before running.")
+        autoOrientFormLayout.addRow("Orient Transform: ", self.orientTransformSelector)
+
+        self.autoOrientButton = qt.QPushButton("Auto Orient")
+        self.autoOrientButton.setToolTip("Detect Z-frame rod principal axis via PCA and align to the selected Detection Orientation axis.")
+        self.autoOrientButton.setStyleSheet(baseButtonStyle + " color: #0055aa;")
+        self.autoOrientButton.enabled = True
+        autoOrientFormLayout.addRow(self.autoOrientButton)
+
+        self.autoOrientStatusLabel = qt.QLabel("")
+        autoOrientFormLayout.addRow("Status: ", self.autoOrientStatusLabel)
+
+        self.autoOrientButton.connect('clicked(bool)', self.onAutoOrientButton)
+
         self.layout.addStretch(1)
+
+    def onAutoOrientButton(self):
+        inputVolume = self.inputSelector.currentNode()
+        orientTransform = self.orientTransformSelector.currentNode()
+        if not inputVolume:
+            self.autoOrientStatusLabel.setText("FAILED: No input volume selected")
+            return
+        if not orientTransform:
+            self.autoOrientStatusLabel.setText("FAILED: No orient transform selected")
+            return
+        try:
+            orientation = self.orientationSelector.currentText
+            success, message = self.logic.autoOrient(inputVolume, orientTransform, orientation)
+            if success:
+                self.autoOrientStatusLabel.setText("OK: " + message)
+            else:
+                self.autoOrientStatusLabel.setText("SKIPPED: " + message)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.autoOrientStatusLabel.setText("FAILED: " + str(e))
 
     def onVisualizeButton(self):
         try:
@@ -389,6 +440,7 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             return True
         else:
             logging.error('Processing failed')
+            slicer.util.errorDisplay("Z-Frame registration failed. No valid slices found.\nPlease check:\n1. 'Scripted Registration Parameters' are used.\n2. Marker Diameter is correct.\n3. Slice Range covers the frame.\n4. View 'Python Interactor' for debug logs.")
             return False
 
     def clear_detected_points_visualization(self):
@@ -533,3 +585,178 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             markupsNode.AddControlPoint(vtk.vtkVector3d(end_pt), f"Rod{i+1}-End")
 
         print(f"Created topology visualization: Lines and Labeled Points (Red)")
+
+    # ------------------------------------------------------------------
+    # Auto Orient helpers
+    # ------------------------------------------------------------------
+
+    def autoOrient(self, inputVolume, outputTransform, orientation):
+        """Align the Z-frame principal axis to the selected orientation axis.
+
+        Returns:
+            (bool, str): (True, message) on success, (False, reason) on skip/failure.
+        """
+        logging.info("AutoOrient: starting")
+
+        imageData = inputVolume.GetImageData()
+        if not imageData:
+            return (False, "Input image is invalid")
+
+        # Numpy array (flat -> 3-D)
+        dims = imageData.GetDimensions()  # (I, J, K)
+        arr = vtk.util.numpy_support.vtk_to_numpy(
+            imageData.GetPointData().GetScalars()
+        ).reshape(dims[2], dims[1], dims[0])  # (K, J, I)
+
+        # Otsu threshold
+        threshold = self._otsuThreshold(arr)
+        bright_mask = arr > threshold
+        bright_count = int(np.count_nonzero(bright_mask))
+        logging.info(f"AutoOrient: Otsu threshold={threshold}, bright voxels={bright_count}")
+
+        if bright_count < 50:
+            return (False, "Too few bright voxels")
+
+        # IJK coordinates of bright voxels
+        kk, jj, ii = np.nonzero(bright_mask)
+        ijk_coords = np.column_stack([ii, jj, kk]).astype(np.float64)  # (N, 3)
+
+        # IJK -> RAS
+        ijkToRas = vtk.vtkMatrix4x4()
+        inputVolume.GetIJKToRASMatrix(ijkToRas)
+        ijkToRas_np = np.eye(4)
+        for r in range(4):
+            for c in range(4):
+                ijkToRas_np[r, c] = ijkToRas.GetElement(r, c)
+
+        ones = np.ones((ijk_coords.shape[0], 1))
+        ijk_h = np.hstack([ijk_coords, ones])  # (N, 4)
+        ras_coords = (ijkToRas_np @ ijk_h.T).T[:, :3]  # (N, 3)
+
+        # PCA via covariance eigen-decomposition
+        center = ras_coords.mean(axis=0)
+        centered = ras_coords - center
+        cov = np.cov(centered, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        # eigh returns ascending order; last is largest
+        principal_axis = eigenvectors[:, -1]
+        principal_axis = principal_axis / np.linalg.norm(principal_axis)
+
+        logging.info(f"AutoOrient: principal axis (RAS) = {principal_axis}")
+        logging.info(f"AutoOrient: eigenvalues = {eigenvalues}")
+        if eigenvalues[-2] > 1e-12:
+            elongation = eigenvalues[-1] / eigenvalues[-2]
+            logging.info(f"AutoOrient: elongation ratio (lambda1/lambda2) = {elongation:.2f}")
+
+        # Target axis from orientation
+        if "Axial" in orientation:
+            target_axis = np.array([0.0, 0.0, 1.0])
+        elif "Coronal" in orientation:
+            target_axis = np.array([0.0, 1.0, 0.0])
+        elif "Sagittal" in orientation:
+            target_axis = np.array([1.0, 0.0, 0.0])
+        else:
+            target_axis = np.array([0.0, 0.0, 1.0])
+
+        dot_val = float(np.dot(principal_axis, target_axis))
+        logging.info(f"AutoOrient: dot(principal, target) = {dot_val:.6f}")
+
+        if abs(dot_val) > 0.98:
+            # Already aligned – set identity
+            identity = vtk.vtkMatrix4x4()
+            identity.Identity()
+            outputTransform.SetMatrixTransformToParent(identity)
+            return (False, "Already well-aligned")
+
+        # Compute rotation matrix
+        mat4 = self._computeAlignmentRotation(principal_axis, target_axis, center)
+
+        vtkMat = vtk.vtkMatrix4x4()
+        for r in range(4):
+            for c in range(4):
+                vtkMat.SetElement(r, c, mat4[r, c])
+        outputTransform.SetMatrixTransformToParent(vtkMat)
+
+        logging.info("AutoOrient: transform set successfully")
+        return (True, "Orientation transform applied")
+
+    @staticmethod
+    def _otsuThreshold(arr):
+        """Compute Otsu threshold using a 256-bin histogram (numpy only)."""
+        arr_flat = arr.ravel().astype(np.float64)
+        min_val, max_val = float(arr_flat.min()), float(arr_flat.max())
+        if max_val == min_val:
+            return min_val
+
+        num_bins = 256
+        hist, bin_edges = np.histogram(arr_flat, bins=num_bins, range=(min_val, max_val))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        hist = hist.astype(np.float64)
+
+        total = hist.sum()
+        sum_total = (hist * bin_centers).sum()
+
+        weight_bg = 0.0
+        sum_bg = 0.0
+        best_thresh = bin_centers[0]
+        best_var = -1.0
+
+        for i in range(num_bins):
+            weight_bg += hist[i]
+            if weight_bg == 0:
+                continue
+            weight_fg = total - weight_bg
+            if weight_fg == 0:
+                break
+
+            sum_bg += hist[i] * bin_centers[i]
+            mean_bg = sum_bg / weight_bg
+            mean_fg = (sum_total - sum_bg) / weight_fg
+
+            var_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+            if var_between > best_var:
+                best_var = var_between
+                best_thresh = bin_centers[i]
+
+        return best_thresh
+
+    @staticmethod
+    def _computeAlignmentRotation(source_axis, target_axis, center_point):
+        """Rodrigues rotation from *source_axis* to *target_axis* about *center_point*.
+
+        Handles PCA sign ambiguity: if dot < 0, source is flipped before computing rotation.
+        Returns a 4x4 homogeneous transformation matrix (numpy).
+        """
+        src = source_axis / np.linalg.norm(source_axis)
+        tgt = target_axis / np.linalg.norm(target_axis)
+
+        # Resolve sign ambiguity
+        if np.dot(src, tgt) < 0:
+            src = -src
+
+        cross = np.cross(src, tgt)
+        sin_a = np.linalg.norm(cross)
+        cos_a = np.dot(src, tgt)
+
+        if sin_a < 1e-10:
+            # Vectors are (anti-)parallel – return identity
+            T = np.eye(4)
+            return T
+
+        k = cross / sin_a  # unit rotation axis
+
+        # Skew-symmetric matrix K
+        K = np.array([
+            [0, -k[2], k[1]],
+            [k[2], 0, -k[0]],
+            [-k[1], k[0], 0],
+        ])
+        R = np.eye(3) + sin_a * K + (1 - cos_a) * (K @ K)
+
+        # Build 4x4: rotate about center_point
+        c = np.asarray(center_point, dtype=np.float64)
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = c - R @ c
+
+        return T
