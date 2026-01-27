@@ -693,7 +693,7 @@ class ZFrameRegistrationWithROILogic(ScriptedLoadableModuleLogic, ModuleLogicMix
       registration.SetOrientationBase(ZquaternionBase)
       registration.SetFrameTopology(frameTopologyArr)
 
-      result, Zposition, Zorientation, all_detected_points = registration.Register(sliceRange)
+      result, Zposition, Zorientation, all_detected_points, rms_error = registration.Register(sliceRange)
 
     # Visualization of detected points
     if visualize and all_detected_points:
@@ -711,12 +711,21 @@ class ZFrameRegistrationWithROILogic(ScriptedLoadableModuleLogic, ModuleLogicMix
 
       outputTransform.SetMatrixTransformToParent(zMatrix)
       logging.info('Scripted Registration Processing completed')
+      if rms_error is not None:
+        rms_msg = f"RMS Error: {rms_error:.4f} mm"
+        logging.info(rms_msg)
+        slicer.util.infoDisplay(rms_msg, windowTitle="Registration Result")
       return True
     elif result and not updateTransform:
       logging.info('Detection completed (Transform update skipped)')
+      if rms_error is not None:
+        rms_msg = f"RMS Error: {rms_error:.4f} mm"
+        logging.info(rms_msg)
+        slicer.util.infoDisplay(rms_msg, windowTitle="Detection Result")
       return True
     else:
       logging.error('Scripted Registration Processing failed')
+      slicer.util.errorDisplay("Z-Frame registration failed. No valid slices found.\nPlease check:\n1. 'Scripted Registration Parameters' are used.\n2. Marker Diameter is correct.\n3. Slice Range covers the frame.\n4. View 'Python Interactor' for debug logs.")
       return False
 
   def clear_detected_points_visualization(self):

@@ -189,6 +189,7 @@ class ZFrameRegistration:
         T = np.zeros((4, 4))
         P = np.zeros(3)
         all_detected_points = []
+        per_slice_positions = []
 
         matrix = np.eye(4)
         matrix[0:3, 0] = [ntx, nty, ntz]
@@ -220,7 +221,8 @@ class ZFrameRegistration:
             if self.RegisterQuaternion(position, quaternion, self.ZOrientationBase,
                                     current_slice, self.InputImageDim, spacing):
                 P += np.array(position)
-                
+                per_slice_positions.append(np.array(position).copy())
+
                 q = np.array(quaternion)
                 T += np.outer(q, q)
                 n += 1
@@ -234,8 +236,8 @@ class ZFrameRegistration:
             print(f"=== End Slice Index: {slindex} ===\n")
                 
         if n <= 0:
-            return False, None, None, []
-            
+            return False, None, None, [], None
+
         P /= float(n)
         T /= float(n)
 
@@ -244,12 +246,12 @@ class ZFrameRegistration:
 
         Zposition = P
         Zorientation = eigenvecs[:, max_idx]
-        
+
         transform_matrix = np.eye(4)
         transform_matrix[:3, :3] = zf.QuaternionToMatrix(Zorientation)[:3, :3]
-        
+
         z_direction = transform_matrix[:3, 2]
-        
+
         if np.dot(z_direction, np.array([0, 0, 1])) < 0:
             print("ZFrameRegistration - Correcting orientation to point superior")
             rot_matrix = np.array([
@@ -260,8 +262,20 @@ class ZFrameRegistration:
             ])
             new_transform = np.dot(transform_matrix, rot_matrix)
             Zorientation = zf.MatrixToQuaternion(new_transform)
-        
-        return True, Zposition, Zorientation, all_detected_points
+
+        # Compute RMS error: spread of per-slice positions around the average
+        rms_error = None
+        if len(per_slice_positions) > 1:
+            positions_arr = np.array(per_slice_positions)
+            deviations = positions_arr - Zposition
+            squared_distances = np.sum(deviations ** 2, axis=1)
+            rms_error = float(np.sqrt(np.mean(squared_distances)))
+            print(f"RMS error (position spread across {n} slices): {rms_error:.4f} mm")
+        elif len(per_slice_positions) == 1:
+            rms_error = 0.0
+            print("RMS error: 0.0 mm (single slice)")
+
+        return True, Zposition, Zorientation, all_detected_points, rms_error
 
     # Modified: Dynamic kernel creation based on diameter
     def Init(self, xsize, ysize):
