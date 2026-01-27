@@ -701,6 +701,42 @@ class ZFrameRegistrationWithROILogic(ScriptedLoadableModuleLogic, ModuleLogicMix
       print(f"Visualizing points for {len(points_to_visualize)} slices (Step: {visualizeStep})")
       self.visualize_detected_points(inputVolume, points_to_visualize, orientation)
 
+    # --- Print detected / template points in RAS (mm) ---
+    if result and all_detected_points:
+      ijkToRas = vtk.vtkMatrix4x4()
+      inputVolume.GetIJKToRASMatrix(ijkToRas)
+
+      print("\n=== Detected Points (RAS mm) ===")
+      for item in all_detected_points:
+        slice_idx = item["slice"]
+        points = item["points"]
+        for i, pt in enumerate(points):
+          if "Axial" in orientation:
+            ijk = [pt[0], pt[1], slice_idx, 1.0]
+          elif "Coronal" in orientation:
+            ijk = [pt[0], slice_idx, pt[1], 1.0]
+          elif "Sagittal" in orientation:
+            ijk = [slice_idx, pt[0], pt[1], 1.0]
+          ras = [0.0] * 4
+          ijkToRas.MultiplyPoint(ijk, ras)
+          print(f"  Slice {slice_idx}, Fid {i}: RAS = ({ras[0]:.2f}, {ras[1]:.2f}, {ras[2]:.2f})")
+
+      regMatrix = np.eye(4)
+      regMatrix[:3, :3] = zf.QuaternionToMatrix(Zorientation)[:3, :3]
+      regMatrix[0:3, 3] = Zposition
+
+      print("\n=== Template Points (RAS mm) ===")
+      origins = frameTopologyArr[0:3]
+      vectors = frameTopologyArr[3:6]
+      for i, (o, v) in enumerate(zip(origins, vectors)):
+        start_frame = np.array([o[0], o[1], o[2], 1.0])
+        end_frame = np.array([o[0] + v[0], o[1] + v[1], o[2] + v[2], 1.0])
+        start_ras = regMatrix @ start_frame
+        end_ras = regMatrix @ end_frame
+        print(f"  Rod {i+1} Start: RAS = ({start_ras[0]:.2f}, {start_ras[1]:.2f}, {start_ras[2]:.2f})")
+        print(f"  Rod {i+1} End:   RAS = ({end_ras[0]:.2f}, {end_ras[1]:.2f}, {end_ras[2]:.2f})")
+    # -------------------------------------------------
+
     if result and updateTransform:
       matrix = zf.QuaternionToMatrix(Zorientation)
       zMatrix = vtk.vtkMatrix4x4()
