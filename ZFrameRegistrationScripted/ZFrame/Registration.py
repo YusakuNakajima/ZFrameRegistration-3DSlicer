@@ -416,6 +416,7 @@ class ZFrameRegistration:
             # Simplified peak check
             # For large markers, the standard offpeak check might be too sensitive
             # Just proceeding if peak is strong enough relative to global max (which is 1.0)
+            print(f"Registration::LocateFiducials - Detected peak {i}: {peak_val}.")
             if peak_val < 0.3:
                  i -= 1
                  print(f"Registration::LocateFiducials - Peak too weak ({peak_val}).")
