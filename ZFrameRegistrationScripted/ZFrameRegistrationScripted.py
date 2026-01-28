@@ -193,6 +193,27 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.autoOrientOrientationSelector.setToolTip("Select the target orientation axis for alignment.")
         autoOrientFormLayout.addRow("Target Orientation: ", self.autoOrientOrientationSelector)
 
+        # Enable Roll Fix checkbox
+        self.enableRollFixCheckbox = qt.QCheckBox()
+        self.enableRollFixCheckbox.setChecked(True)  # Default: enabled
+        autoOrientFormLayout.addRow("Enable Roll Fix (PC2): ", self.enableRollFixCheckbox)
+
+        # Lambda2/Lambda3 threshold spin box
+        self.lambdaRatioThresholdSpinBox = qt.QDoubleSpinBox()
+        self.lambdaRatioThresholdSpinBox.setRange(1.0, 10.0)
+        self.lambdaRatioThresholdSpinBox.setValue(1.5)
+        self.lambdaRatioThresholdSpinBox.setSingleStep(0.1)
+        autoOrientFormLayout.addRow("Lambda2/Lambda3 Threshold: ", self.lambdaRatioThresholdSpinBox)
+
+        # Roll offset spin box (additional rotation after PC2-based roll fix)
+        self.rollOffsetSpinBox = qt.QDoubleSpinBox()
+        self.rollOffsetSpinBox.setRange(-180.0, 180.0)
+        self.rollOffsetSpinBox.setValue(0.0)
+        self.rollOffsetSpinBox.setSingleStep(15.0)
+        self.rollOffsetSpinBox.setSuffix(" deg")
+        self.rollOffsetSpinBox.setToolTip("Additional roll offset applied after PC2-based roll fix (degrees)")
+        autoOrientFormLayout.addRow("Roll Offset: ", self.rollOffsetSpinBox)
+
         self.orientTransformSelector = slicer.qMRMLNodeComboBox()
         self.orientTransformSelector.nodeTypes = ["vtkMRMLLinearTransformNode"]
         self.orientTransformSelector.selectNodeUponCreation = True
@@ -229,7 +250,13 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
             return
         try:
             orientation = self.autoOrientOrientationSelector.currentText
-            success, message = self.logic.autoOrient(inputVolume, orientTransform, orientation)
+            enableRollFix = self.enableRollFixCheckbox.isChecked()
+            lambdaRatioThreshold = self.lambdaRatioThresholdSpinBox.value
+            rollOffsetDeg = self.rollOffsetSpinBox.value
+            success, message = self.logic.autoOrient(inputVolume, orientTransform, orientation,
+                                                      enableRollFix=enableRollFix,
+                                                      lambdaRatioThreshold=lambdaRatioThreshold,
+                                                      rollOffsetDeg=rollOffsetDeg)
             if success:
                 self.autoOrientStatusLabel.setText("OK: " + message)
             else:
@@ -667,8 +694,17 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
     # Auto Orient helpers
     # ------------------------------------------------------------------
 
-    def autoOrient(self, inputVolume, outputTransform, orientation):
+    def autoOrient(self, inputVolume, outputTransform, orientation,
+                   enableRollFix=True, lambdaRatioThreshold=1.5, rollOffsetDeg=0.0):
         """Align the Z-frame principal axis to the selected orientation axis.
+
+        Args:
+            inputVolume: Input volume node
+            outputTransform: Output transform node
+            orientation: Target orientation ("Axial", "Coronal", or "Sagittal")
+            enableRollFix: If True, apply PC2-based roll fix (Step B)
+            lambdaRatioThreshold: Minimum lambda2/lambda3 ratio to apply roll fix
+            rollOffsetDeg: Additional roll offset in degrees (applied after PC2 roll fix)
 
         Returns:
             (bool, str): (True, message) on success, (False, reason) on skip/failure.
@@ -715,14 +751,20 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         centered = ras_coords - center
         cov = np.cov(centered, rowvar=False)
         eigenvalues, eigenvectors = np.linalg.eigh(cov)
-        # eigh returns ascending order; last is largest
-        principal_axis = eigenvectors[:, -1]
-        principal_axis = principal_axis / np.linalg.norm(principal_axis)
+        # eigh returns ascending order: [lambda3, lambda2, lambda1] (smallest to largest)
+        lambda3, lambda2, lambda1 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
+        pc3, pc2, pc1 = eigenvectors[:, 0], eigenvectors[:, 1], eigenvectors[:, 2]
 
-        logging.info(f"AutoOrient: principal axis (RAS) = {principal_axis}")
-        logging.info(f"AutoOrient: eigenvalues = {eigenvalues}")
-        if eigenvalues[-2] > 1e-12:
-            elongation = eigenvalues[-1] / eigenvalues[-2]
+        # Normalize principal axes
+        pc1 = pc1 / np.linalg.norm(pc1)
+        pc2 = pc2 / np.linalg.norm(pc2)
+
+        logging.info(f"AutoOrient: PC1 (principal axis) = {pc1}")
+        logging.info(f"AutoOrient: PC2 (secondary axis) = {pc2}")
+        logging.info(f"AutoOrient: eigenvalues = lambda1={lambda1:.4f}, lambda2={lambda2:.4f}, lambda3={lambda3:.4f}")
+
+        if lambda2 > 1e-12:
+            elongation = lambda1 / lambda2
             logging.info(f"AutoOrient: elongation ratio (lambda1/lambda2) = {elongation:.2f}")
 
         # Target axis from orientation
@@ -735,18 +777,69 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         else:
             target_axis = np.array([0.0, 0.0, 1.0])
 
-        dot_val = float(np.dot(principal_axis, target_axis))
-        logging.info(f"AutoOrient: dot(principal, target) = {dot_val:.6f}")
+        dot_val = float(np.dot(pc1, target_axis))
+        logging.info(f"AutoOrient: dot(PC1, target) = {dot_val:.6f}")
 
+        # ===== Step A: PC1 alignment (existing logic) =====
         if abs(dot_val) > 0.98:
-            # Already aligned – set identity
-            identity = vtk.vtkMatrix4x4()
-            identity.Identity()
-            outputTransform.SetMatrixTransformToParent(identity)
-            return (False, "Already well-aligned")
+            # Already aligned – use identity for R1
+            R1 = np.eye(3)
+            logging.info("AutoOrient: PC1 already well-aligned, R1 = identity")
+        else:
+            # Compute R1: rotate PC1 to target_axis
+            R1 = self._computeAlignmentRotation3x3(pc1, target_axis)
+            logging.info(f"AutoOrient: R1 computed (PC1 -> target_axis)")
 
-        # Compute rotation matrix
-        mat4 = self._computeAlignmentRotation(principal_axis, target_axis, center)
+        # ===== Step B: Roll fix using PC2 =====
+        R_final = R1  # Default: no roll fix
+        roll_applied = False
+        roll_angle_deg = 0.0
+
+        if enableRollFix:
+            # Check lambda2/lambda3 ratio
+            if lambda3 > 1e-12:
+                lambda_ratio = lambda2 / lambda3
+            else:
+                lambda_ratio = float('inf')
+
+            logging.info(f"AutoOrient: lambda2/lambda3 ratio = {lambda_ratio:.4f}, threshold = {lambdaRatioThreshold}")
+
+            if lambda_ratio >= lambdaRatioThreshold:
+                # Rotate PC2 by R1
+                pc2_rotated = R1 @ pc2
+                logging.info(f"AutoOrient: PC2 after R1 rotation = {pc2_rotated}")
+
+                # Compute R2 for roll fix
+                R2, roll_angle_deg, t2 = self._computeRollFixRotation(pc2_rotated, target_axis, orientation)
+
+                logging.info(f"AutoOrient: Template secondary axis (t2) = {t2}")
+                logging.info(f"AutoOrient: Roll fix angle = {roll_angle_deg:.2f} degrees")
+
+                # Final rotation: R = R2 @ R1
+                R_final = R2 @ R1
+                roll_applied = True
+                logging.info("AutoOrient: Roll fix applied (R = R2 @ R1)")
+            else:
+                logging.info(f"AutoOrient: Roll fix SKIPPED (lambda ratio {lambda_ratio:.4f} < threshold {lambdaRatioThreshold})")
+        else:
+            logging.info("AutoOrient: Roll fix disabled by user")
+
+        # ===== Step C: Apply roll offset if specified =====
+        if abs(rollOffsetDeg) > 0.01:
+            R_offset = self._computeAxisRotation(target_axis, rollOffsetDeg)
+            R_final = R_offset @ R_final
+            logging.info(f"AutoOrient: Roll offset applied = {rollOffsetDeg:.1f} degrees")
+        else:
+            logging.info("AutoOrient: No roll offset applied")
+
+        # Build 4x4 transformation matrix (rotate about center)
+        c = np.asarray(center, dtype=np.float64)
+        mat4 = np.eye(4)
+        mat4[:3, :3] = R_final
+        mat4[:3, 3] = c - R_final @ c
+
+        # Debug: print final rotation matrix
+        logging.info(f"AutoOrient: Final rotation matrix R:\n{R_final}")
 
         vtkMat = vtk.vtkMatrix4x4()
         for r in range(4):
@@ -755,7 +848,14 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         outputTransform.SetMatrixTransformToParent(vtkMat)
 
         logging.info("AutoOrient: transform set successfully")
-        return (True, "Orientation transform applied")
+
+        # Build status message
+        parts = ["Orientation applied"]
+        if roll_applied:
+            parts.append(f"roll={roll_angle_deg:.1f}deg")
+        if abs(rollOffsetDeg) > 0.01:
+            parts.append(f"offset={rollOffsetDeg:.1f}deg")
+        return (True, ", ".join(parts))
 
     @staticmethod
     def _otsuThreshold(arr):
@@ -837,3 +937,137 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
         T[:3, 3] = c - R @ c
 
         return T
+
+    @staticmethod
+    def _computeAlignmentRotation3x3(source_axis, target_axis):
+        """Rodrigues rotation from *source_axis* to *target_axis*.
+
+        Handles PCA sign ambiguity: if dot < 0, source is flipped before computing rotation.
+        Returns a 3x3 rotation matrix (numpy) - for composition with other rotations.
+        """
+        src = source_axis / np.linalg.norm(source_axis)
+        tgt = target_axis / np.linalg.norm(target_axis)
+
+        # Resolve sign ambiguity
+        if np.dot(src, tgt) < 0:
+            src = -src
+
+        cross = np.cross(src, tgt)
+        sin_a = np.linalg.norm(cross)
+        cos_a = np.dot(src, tgt)
+
+        if sin_a < 1e-10:
+            # Vectors are (anti-)parallel – return identity
+            return np.eye(3)
+
+        k = cross / sin_a  # unit rotation axis
+
+        # Skew-symmetric matrix K
+        K = np.array([
+            [0, -k[2], k[1]],
+            [k[2], 0, -k[0]],
+            [-k[1], k[0], 0],
+        ])
+        R = np.eye(3) + sin_a * K + (1 - cos_a) * (K @ K)
+
+        return R
+
+    @staticmethod
+    def _computeRollFixRotation(pc2_rotated, target_axis, orientation):
+        """Compute R2 rotation to fix roll using PC2.
+
+        Args:
+            pc2_rotated: PC2 after R1 rotation (3D vector)
+            target_axis: The principal axis target (e.g., [0,0,1] for Axial)
+            orientation: "Axial", "Coronal", or "Sagittal"
+
+        Returns:
+            (R2, angle_deg, t2): 3x3 rotation matrix, angle in degrees, template secondary axis
+        """
+        # Define template secondary axis t2 based on orientation
+        # This is the expected direction of PC2 after proper alignment
+        if "Axial" in orientation:
+            # Z-frame rods along Z axis, secondary spread in X direction
+            t2 = np.array([1.0, 0.0, 0.0])
+        elif "Coronal" in orientation:
+            # Z-frame rods along Y axis, secondary spread in X direction
+            t2 = np.array([1.0, 0.0, 0.0])
+        elif "Sagittal" in orientation:
+            # Z-frame rods along X axis, secondary spread in Y direction
+            t2 = np.array([0.0, 1.0, 0.0])
+        else:
+            t2 = np.array([1.0, 0.0, 0.0])
+
+        # Project pc2_rotated onto the plane perpendicular to target_axis
+        # p = v - (v . n) * n, where n is target_axis
+        target_axis = target_axis / np.linalg.norm(target_axis)
+        dot_proj = np.dot(pc2_rotated, target_axis)
+        pc2_in_plane = pc2_rotated - dot_proj * target_axis
+
+        # Normalize the projection
+        pc2_in_plane_norm = np.linalg.norm(pc2_in_plane)
+        if pc2_in_plane_norm < 1e-10:
+            # PC2 is parallel to target axis - can't determine roll
+            return np.eye(3), 0.0, t2
+
+        pc2_in_plane = pc2_in_plane / pc2_in_plane_norm
+
+        # t2 should already be in the perpendicular plane, but project just in case
+        t2_in_plane = t2 - np.dot(t2, target_axis) * target_axis
+        t2_in_plane_norm = np.linalg.norm(t2_in_plane)
+        if t2_in_plane_norm < 1e-10:
+            return np.eye(3), 0.0, t2
+        t2_in_plane = t2_in_plane / t2_in_plane_norm
+
+        # Compute signed angle between pc2_in_plane and t2_in_plane
+        # Rotation axis is target_axis
+        cos_angle = np.clip(np.dot(pc2_in_plane, t2_in_plane), -1.0, 1.0)
+        cross_prod = np.cross(pc2_in_plane, t2_in_plane)
+        sin_angle = np.dot(cross_prod, target_axis)  # Signed based on rotation axis
+
+        angle_rad = np.arctan2(sin_angle, cos_angle)
+        angle_deg = np.degrees(angle_rad)
+
+        # Build rotation matrix R2: rotate about target_axis by angle_rad
+        if abs(angle_rad) < 1e-10:
+            return np.eye(3), 0.0, t2
+
+        k = target_axis  # unit rotation axis
+        sin_a = np.sin(angle_rad)
+        cos_a = np.cos(angle_rad)
+
+        # Skew-symmetric matrix K
+        K = np.array([
+            [0, -k[2], k[1]],
+            [k[2], 0, -k[0]],
+            [-k[1], k[0], 0],
+        ])
+        R2 = np.eye(3) + sin_a * K + (1 - cos_a) * (K @ K)
+
+        return R2, angle_deg, t2
+
+    @staticmethod
+    def _computeAxisRotation(axis, angle_deg):
+        """Compute 3x3 rotation matrix for rotation around a given axis.
+
+        Args:
+            axis: Unit axis vector (3D)
+            angle_deg: Rotation angle in degrees
+
+        Returns:
+            3x3 rotation matrix (numpy)
+        """
+        k = axis / np.linalg.norm(axis)
+        angle_rad = np.radians(angle_deg)
+        sin_a = np.sin(angle_rad)
+        cos_a = np.cos(angle_rad)
+
+        # Skew-symmetric matrix K
+        K = np.array([
+            [0, -k[2], k[1]],
+            [k[2], 0, -k[0]],
+            [-k[1], k[0], 0],
+        ])
+        R = np.eye(3) + sin_a * K + (1 - cos_a) * (K @ K)
+
+        return R
