@@ -746,6 +746,20 @@ class ZFrameRegistrationWithROILogic(ScriptedLoadableModuleLogic, ModuleLogicMix
         zMatrix.SetElement(i,3, Zposition[i])
 
       outputTransform.SetMatrixTransformToParent(zMatrix)
+
+      # --- Rotation sanity check ---
+      R = np.array([[zMatrix.GetElement(i, j) for j in range(3)] for i in range(3)])
+      det_R = np.linalg.det(R)
+      orth_err = np.linalg.norm(R.T @ R - np.eye(3))
+      print(f"\n=== Output Transform Rotation Check ===")
+      print(f"  det(R)    = {det_R:.6f}   (expect +1)")
+      print(f"  orth_err  = {orth_err:.6e}   (expect ~0)")
+      if abs(det_R - 1.0) > 0.01 or orth_err > 0.01:
+        print("  WARNING: rotation matrix may be invalid (det != +1 or poor orthogonality)")
+      else:
+        print("  OK: valid rotation matrix")
+      # -----------------------------
+
       logging.info('Scripted Registration Processing completed')
       if rms_error is not None:
         rms_msg = f"RMS Error: {rms_error:.4f} mm"
