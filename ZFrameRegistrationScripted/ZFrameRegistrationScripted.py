@@ -174,6 +174,25 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(autoOrientCollapsibleButton)
         autoOrientFormLayout = qt.QFormLayout(autoOrientCollapsibleButton)
 
+        # Input volume selector for Auto Orient (separate from main panel)
+        self.autoOrientInputSelector = slicer.qMRMLNodeComboBox()
+        self.autoOrientInputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.autoOrientInputSelector.selectNodeUponCreation = True
+        self.autoOrientInputSelector.addEnabled = False
+        self.autoOrientInputSelector.removeEnabled = False
+        self.autoOrientInputSelector.noneEnabled = False
+        self.autoOrientInputSelector.showHidden = False
+        self.autoOrientInputSelector.showChildNodeTypes = False
+        self.autoOrientInputSelector.setMRMLScene(slicer.mrmlScene)
+        self.autoOrientInputSelector.setToolTip("Select the input volume for auto-orientation (typically a cropped Z-frame region).")
+        autoOrientFormLayout.addRow("Input Volume: ", self.autoOrientInputSelector)
+
+        # Orientation selector for Auto Orient (separate from main panel)
+        self.autoOrientOrientationSelector = qt.QComboBox()
+        self.autoOrientOrientationSelector.addItems(["Axial (Red)", "Coronal (Green)", "Sagittal (Yellow)"])
+        self.autoOrientOrientationSelector.setToolTip("Select the target orientation axis for alignment.")
+        autoOrientFormLayout.addRow("Target Orientation: ", self.autoOrientOrientationSelector)
+
         self.orientTransformSelector = slicer.qMRMLNodeComboBox()
         self.orientTransformSelector.nodeTypes = ["vtkMRMLLinearTransformNode"]
         self.orientTransformSelector.selectNodeUponCreation = True
@@ -183,11 +202,11 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.orientTransformSelector.showHidden = False
         self.orientTransformSelector.showChildNodeTypes = False
         self.orientTransformSelector.setMRMLScene(slicer.mrmlScene)
-        self.orientTransformSelector.setToolTip("Output transform for auto-orientation. Crop the volume to the Z-frame region before running.")
-        autoOrientFormLayout.addRow("Orient Transform: ", self.orientTransformSelector)
+        self.orientTransformSelector.setToolTip("Output transform for auto-orientation.")
+        autoOrientFormLayout.addRow("Output Transform: ", self.orientTransformSelector)
 
         self.autoOrientButton = qt.QPushButton("Auto Orient")
-        self.autoOrientButton.setToolTip("Detect Z-frame rod principal axis via PCA and align to the selected Detection Orientation axis.")
+        self.autoOrientButton.setToolTip("Detect Z-frame rod principal axis via PCA and align to the selected Target Orientation axis.")
         self.autoOrientButton.setStyleSheet(baseButtonStyle + " color: #0055aa;")
         self.autoOrientButton.enabled = True
         autoOrientFormLayout.addRow(self.autoOrientButton)
@@ -200,16 +219,16 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
     def onAutoOrientButton(self):
-        inputVolume = self.inputSelector.currentNode()
+        inputVolume = self.autoOrientInputSelector.currentNode()
         orientTransform = self.orientTransformSelector.currentNode()
         if not inputVolume:
             self.autoOrientStatusLabel.setText("FAILED: No input volume selected")
             return
         if not orientTransform:
-            self.autoOrientStatusLabel.setText("FAILED: No orient transform selected")
+            self.autoOrientStatusLabel.setText("FAILED: No output transform selected")
             return
         try:
-            orientation = self.orientationSelector.currentText
+            orientation = self.autoOrientOrientationSelector.currentText
             success, message = self.logic.autoOrient(inputVolume, orientTransform, orientation)
             if success:
                 self.autoOrientStatusLabel.setText("OK: " + message)
