@@ -118,9 +118,26 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
         # Marker Diameter Setting
         self.markerDiameterSpinBox = qt.QSpinBox()
         self.markerDiameterSpinBox.setRange(3, 100)
-        self.markerDiameterSpinBox.setValue(5) 
+        self.markerDiameterSpinBox.setValue(5)
         self.markerDiameterSpinBox.setToolTip("Diameter of the fiducial marker in pixels.")
         parametersFormLayout.addRow("Marker Diameter (px): ", self.markerDiameterSpinBox)
+
+        # Diagnostic Logging Controls
+        self.enableDiagnosticsCheckbox = qt.QCheckBox()
+        self.enableDiagnosticsCheckbox.setChecked(True)
+        self.enableDiagnosticsCheckbox.setToolTip("Enable JSONL diagnostic logging for registration analysis.")
+        parametersFormLayout.addRow("Enable Diagnostic Logging: ", self.enableDiagnosticsCheckbox)
+
+        self.diagnosticsPathLineEdit = qt.QLineEdit()
+        self.diagnosticsPathLineEdit.setPlaceholderText("Leave empty for default: ~/zframe_diagnostics/")
+        self.diagnosticsPathLineEdit.setToolTip("Optional custom path for diagnostic JSONL output file.")
+        self.diagnosticsPathButton = qt.QPushButton("Browse...")
+        self.diagnosticsPathButton.setMaximumWidth(80)
+        diagnosticsPathLayout = qt.QHBoxLayout()
+        diagnosticsPathLayout.addWidget(self.diagnosticsPathLineEdit)
+        diagnosticsPathLayout.addWidget(self.diagnosticsPathButton)
+        parametersFormLayout.addRow("Diagnostic Output Path: ", diagnosticsPathLayout)
+        self.diagnosticsPathButton.connect('clicked(bool)', self.onDiagnosticsPathBrowse)
 
         # Initialize UI state
         self.onInputVolumeSelected(self.inputSelector.currentNode())
@@ -324,6 +341,14 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
     def onZFrameConfigChanged(self, configName):
         self.frameTopologyTextEdit.setText(self.zFrameTopologies.get(configName, "Unknown configuration"))
 
+    def onDiagnosticsPathBrowse(self):
+        path = qt.QFileDialog.getSaveFileName(
+            self.parent, "Select Diagnostic Output File",
+            "", "JSONL Files (*.jsonl);;All Files (*)"
+        )
+        if path:
+            self.diagnosticsPathLineEdit.setText(path)
+
     def onApplyButton(self):
         self.runRegistration(visualize=False, updateTransform=True)
 
@@ -332,6 +357,8 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
 
     def runRegistration(self, visualize, updateTransform=True):
         try:
+            enableDiagnostics = self.enableDiagnosticsCheckbox.isChecked()
+            diagnosticsPath = self.diagnosticsPathLineEdit.text.strip() if self.diagnosticsPathLineEdit.text.strip() else None
             self.logic.run(self.inputSelector.currentNode(),
                      self.outputSelector.currentNode(),
                      self.zframeConfigSelector.currentText,
@@ -343,18 +370,26 @@ class ZFrameRegistrationScriptedWidget(ScriptedLoadableModuleWidget):
                      visualizeStep=int(self.visStepSpinBox.value),
                      markerDiameter=int(self.markerDiameterSpinBox.value),
                      updateTransform=updateTransform,
-                     orientation=self.orientationSelector.currentText)
+                     orientation=self.orientationSelector.currentText,
+                     enableDiagnostics=enableDiagnostics,
+                     diagnosticsPath=diagnosticsPath)
         except Exception as e:
             slicer.util.errorDisplay("Failed to compute results: "+str(e))
             import traceback
             traceback.print_exc()
 
 class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
-    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1, markerDiameter=11, updateTransform=True, orientation="Axial"):
+    def run(self, inputVolume, outputTransform, zframeConfig, zframeType, frameTopology, startSlice, endSlice, visualize=False, visualizeStep=1, markerDiameter=11, updateTransform=True, orientation="Axial", enableDiagnostics=False, diagnosticsPath=None):
         logging.info('Processing started')
-        
+
         if not inputVolume or not outputTransform:
             raise ValueError("Input volume or output transform is missing")
+
+        # Initialize diagnostic logger if enabled
+        logger = None
+        if enableDiagnostics:
+            from ZFrame.DiagnosticLogger import ZFrameDiagnosticLogger
+            logger = ZFrameDiagnosticLogger(output_path=diagnosticsPath, enabled=True)
             
         imageData = inputVolume.GetImageData()
         if not imageData:
@@ -445,12 +480,12 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
              raise ValueError(f"Error parsing topology: {e}")
 
         if zframeType == "7-fiducial":
-            registration = ZFrameRegistration(numFiducials=7)
+            registration = ZFrameRegistration(numFiducials=7, logger=logger)
         elif zframeType == "9-fiducial":
-            registration = ZFrameRegistration(numFiducials=9)
+            registration = ZFrameRegistration(numFiducials=9, logger=logger)
         else:
             raise ValueError("Invalid Z-frame configuration")
-        
+
         result = False
         all_detected_points = []
 
@@ -459,8 +494,19 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
             registration.SetInputImage(imageDataArr, imageTransform)
             registration.SetOrientationBase(ZquaternionBase)
             registration.SetFrameTopology(frameTopologyArr)
-            
-            result, Zposition, Zorientation, all_detected_points, rms_error = registration.Register(sliceRange)
+
+            # Start logger session if enabled
+            if logger:
+                logger.start_session({
+                    'num_fiducials': 7 if zframeType == "7-fiducial" else 9,
+                    'marker_diameter': markerDiameter,
+                    'orientation': orientation,
+                    'frame_config': zframeConfig,
+                    'slice_range': [startSlice, endSlice],
+                    'frame_topology': frameTopologyArr
+                })
+
+            result, Zposition, Zorientation, all_detected_points, rms_error = registration.Register(sliceRange, logger=logger)
         
         # --- Visualization of detected points ---
         if visualize and all_detected_points:
@@ -529,6 +575,14 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
                 print("  OK: valid rotation matrix")
             # -----------------------------
 
+            # End diagnostic logging session
+            if logger:
+                logger.end_session()
+                diag_path = str(logger.output_path)
+                logging.info(f"Diagnostics written to: {diag_path}")
+                print(f"\n=== Diagnostic Logging ===")
+                print(f"  Output file: {diag_path}")
+
             logging.info('Processing completed')
             if rms_error is not None:
                 rms_msg = f"RMS Error: {rms_error:.4f} mm"
@@ -536,6 +590,14 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
                 slicer.util.infoDisplay(rms_msg, windowTitle="Registration Result")
             return True, rms_error
         elif result and not updateTransform:
+            # End diagnostic logging session
+            if logger:
+                logger.end_session()
+                diag_path = str(logger.output_path)
+                logging.info(f"Diagnostics written to: {diag_path}")
+                print(f"\n=== Diagnostic Logging ===")
+                print(f"  Output file: {diag_path}")
+
             logging.info('Detection completed (Transform update skipped)')
             if rms_error is not None:
                 rms_msg = f"RMS Error: {rms_error:.4f} mm"
@@ -543,6 +605,14 @@ class ZFrameRegistrationScriptedLogic(ScriptedLoadableModuleLogic):
                 slicer.util.infoDisplay(rms_msg, windowTitle="Detection Result")
             return True, rms_error
         else:
+            # End diagnostic logging session even on failure
+            if logger:
+                logger.end_session()
+                diag_path = str(logger.output_path)
+                logging.info(f"Diagnostics written to: {diag_path}")
+                print(f"\n=== Diagnostic Logging ===")
+                print(f"  Output file: {diag_path}")
+
             logging.error('Processing failed')
             slicer.util.errorDisplay("Z-Frame registration failed. No valid slices found.\nPlease check:\n1. 'Scripted Registration Parameters' are used.\n2. Marker Diameter is correct.\n3. Slice Range covers the frame.\n4. View 'Python Interactor' for debug logs.")
             return False, None

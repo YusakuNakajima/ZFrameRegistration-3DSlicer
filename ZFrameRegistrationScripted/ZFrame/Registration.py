@@ -127,7 +127,7 @@ class zf:
         return v + qw * t + np.cross([qx, qy, qz], t)    
         
 class ZFrameRegistration:
-    def __init__(self, numFiducials=7):
+    def __init__(self, numFiducials=7, logger=None):
         self.numFiducials = numFiducials
         self.InputImage = None
         self.InputImageDim = [0, 0, 0]
@@ -139,7 +139,9 @@ class ZFrameRegistration:
         self.lastDetectedCoordinates = None
         # Modified: Initialize marker diameter
         self.markerDiameter = 11
-        
+        # Diagnostic logger
+        self.logger = logger
+
         # Constants
         self.MEPSILON = 1e-10
 
@@ -161,10 +163,14 @@ class ZFrameRegistration:
     def SetOrientationBase(self, orientation):
         self.ZOrientationBase = orientation
 
-    def Register(self, sliceRange):
+    def Register(self, sliceRange, logger=None):
         """Register Z-frame fiducials across multiple slices and compute average transformation."""
+        # Use provided logger or fall back to instance logger
+        if logger is None:
+            logger = self.logger
+
         xsize, ysize, zsize = self.InputImageDim
-        
+
         tx = self.InputImageTrans[0][0]
         ty = self.InputImageTrans[1][0]
         tz = self.InputImageTrans[2][0]
@@ -177,7 +183,7 @@ class ZFrameRegistration:
         px = self.InputImageTrans[0][3]
         py = self.InputImageTrans[1][3]
         pz = self.InputImageTrans[2][3]
-        
+
         psi = np.sqrt(tx*tx + ty*ty + tz*tz)
         psj = np.sqrt(sx*sx + sy*sy + sz*sz)
         psk = np.sqrt(nx*nx + ny*ny + nz*nz)
@@ -195,43 +201,70 @@ class ZFrameRegistration:
         matrix[0:3, 0] = [ntx, nty, ntz]
         matrix[0:3, 1] = [nsx, nsy, nsz]
         matrix[0:3, 2] = [nnx, nny, nnz]
-        
+
         print(f"Processing slices from {sliceRange[0]} to {sliceRange[1]}")
         for slindex in range(sliceRange[0], sliceRange[1]):
             print(f"=== Current Slice Index: {slindex} ===")
+
+            # Start slice logging
+            if logger:
+                logger.start_slice(slindex)
+
             hfovi = psi * (self.InputImageDim[0]-1) / 2.0
             hfovj = psj * (self.InputImageDim[1]-1) / 2.0
             offsetk = psk * slindex
-            
+
             cx = ntx * hfovi + nsx * hfovj + nnx * offsetk
             cy = nty * hfovi + nsy * hfovj + nny * offsetk
             cz = ntz * hfovi + nsz * hfovj + nnz * offsetk
-            
+
             quaternion = zf.MatrixToQuaternion(matrix)
             position = [px + cx, py + cy, pz + cz]
-            
+
             if 0 <= slindex < zsize:
                 current_slice = self.InputImage[:, :, slindex]
             else:
+                if logger:
+                    logger.log_slice_failure("SLICE_OUT_OF_RANGE", {"slice_idx": slindex, "zsize": zsize})
                 return False, None, None, []
-            
+
             self.Init(xsize, ysize)
-            
+
             spacing = [psi, psj, psk]
-            if self.RegisterQuaternion(position, quaternion, self.ZOrientationBase,
-                                    current_slice, self.InputImageDim, spacing):
+            success, fail_code = self.RegisterQuaternion(position, quaternion, self.ZOrientationBase,
+                                    current_slice, self.InputImageDim, spacing)
+
+            if success:
                 P += np.array(position)
                 per_slice_positions.append(np.array(position).copy())
 
                 q = np.array(quaternion)
                 T += np.outer(q, q)
                 n += 1
-                
+
                 if self.lastDetectedCoordinates:
                     all_detected_points.append({
                         "slice": slindex,
                         "points": self.lastDetectedCoordinates
                     })
+
+                # Log success
+                if logger:
+                    # Build transform matrix for this slice
+                    slice_transform = zf.QuaternionToMatrix(quaternion)
+                    slice_transform[:3, 3] = position
+                    logger.log_slice_success(
+                        transform=slice_transform,
+                        position=position,
+                        quaternion=quaternion,
+                        detected_points=self.lastDetectedCoordinates,
+                        template_points=self.frameTopology,
+                        residual=None  # Per-slice residual not computed here
+                    )
+            else:
+                # Log failure
+                if logger:
+                    logger.log_slice_failure(fail_code, {"slice_idx": slindex})
 
             print(f"=== End Slice Index: {slindex} ===\n")
                 
@@ -317,43 +350,50 @@ class ZFrameRegistration:
             self.MFimag /= max_absolute
 
     def RegisterQuaternion(self, position, quaternion, ZquaternionBase, SourceImage, dimension, spacing):
-        """Register the Z-frame using quaternion representation."""
+        """Register the Z-frame using quaternion representation.
+
+        Returns:
+            tuple: (success: bool, fail_code: str or None)
+        """
         Iposition = np.array(position)
         Iorientation = np.array(quaternion)
         ZorientationBase = np.array(ZquaternionBase)
-        
+
         print("ZTrackerTransform - Searching fiducials...")
-        Zcoordinates, tZcoordinates, center = self.LocateFiducials(SourceImage, dimension[0], dimension[1])
-        if Zcoordinates is None:
+        result = self.LocateFiducials(SourceImage, dimension[0], dimension[1])
+        if result[0] is None:
+            # LocateFiducials returns (None, None, None, fail_code) on failure
+            fail_code = result[3] if len(result) > 3 else "LOCATE_FIDUCIALS_FAIL"
             print("ZTrackerTransform::onEventGenerated - Fiducials not detected. No frame lock on this image.")
-            return False
-        
+            return (False, fail_code)
+
+        Zcoordinates, tZcoordinates, center = result[0], result[1], result[2]
         self.lastDetectedCoordinates = Zcoordinates
-        
+
         print("ZTrackerTransform - Checking the fiducial geometries...")
         print(f"Zcoordinates: {Zcoordinates}")
         if not self.CheckFiducialGeometry(Zcoordinates, dimension[0], dimension[1]):
             print("ZTrackerTransform::onEventGenerated - Bad fiducial geometry. No frame lock on this image.")
-            return False
-        
+            return (False, "GEOMETRY_FAIL")
+
         for i in range(self.numFiducials):
             tZcoordinates[i][0] = float(tZcoordinates[i][0]) - center[0]
             tZcoordinates[i][1] = float(tZcoordinates[i][1]) - center[1]
-            
+
             tZcoordinates[i][0] *= spacing[0]
             tZcoordinates[i][1] *= spacing[1]
-        
+
         Zposition, Zorientation = self.LocalizeFrame(tZcoordinates)
         if Zposition is None or Zorientation is None:
             print("ZTrackerTransform::onEventGenerated - Could not localize the frame. Skipping this one.")
-            return False
-        
+            return (False, "LOCALIZE_FAIL")
+
         rotated_position = zf.QuaternionRotateVector(Iorientation, Zposition)
         Zposition = Iposition + rotated_position
-        
+
         Zorientation = zf.QuaternionMultiply(Iorientation, Zorientation)
         Zorientation = zf.QuaternionDivide(Zorientation, ZorientationBase)
-        
+
         position[0] = Zposition[0]
         position[1] = Zposition[1]
         position[2] = Zposition[2]
@@ -361,68 +401,102 @@ class ZFrameRegistration:
         quaternion[1] = Zorientation[1]
         quaternion[2] = Zorientation[2]
         quaternion[3] = Zorientation[3]
-        
-        return True
+
+        return (True, None)
 
     def LocateFiducials(self, SourceImage, xsize, ysize):
-        """Locate the fiducial intercepts in the Z-frame."""
+        """Locate the fiducial intercepts in the Z-frame.
+
+        Returns:
+            tuple: (Zcoordinates, tZcoordinates, center) on success,
+                   (None, None, None, fail_code) on failure.
+        """
         Zcoordinates = [[0, 0] for _ in range(self.numFiducials)]
         tZcoordinates = [[0.0, 0.0] for _ in range(self.numFiducials)]
-        
+
+        # Track peaks for logging
+        peaks_data = []
+        threshold = 0.3
+
         image_fft = fft2(SourceImage)
         IFreal = np.real(image_fft)
         IFimag = np.imag(image_fft)
-        
+
         max_absolute = np.max(np.abs(image_fft))
         if max_absolute < self.MEPSILON:
             print("ZTrackerTransform::LocateFiducials - divide by zero.")
-            return None, None, None
-            
+            return (None, None, None, "FFT_DIVIDE_ZERO")
+
         IFreal /= max_absolute
         IFimag /= max_absolute
-        
+
         PFreal = IFreal * self.MFreal - IFimag * self.MFimag
         PFimag = IFreal * self.MFimag + IFimag * self.MFreal
-        
+
         product_ifft = ifft2(PFreal + 1j * PFimag)
         PIreal = np.real(product_ifft)
         PIreal = np.fft.fftshift(PIreal)
-        
+
         max_absolute = np.max(np.abs(PIreal))
         if max_absolute < self.MEPSILON:
             print("ZTrackerTransform::LocateFiducials - divide by zero.")
-            return None, None, None
-            
+            return (None, None, None, "FFT_DIVIDE_ZERO")
+
         PIreal /= max_absolute
-        
+
         peak_count = 0
-        for i in range(self.numFiducials):
+        i = 0
+        while i < self.numFiducials:
             peak_val, peak_coords = self.FindMax(PIreal)
             Zcoordinates[i] = list(peak_coords)
-            
+
+            # Track peak data for logging
+            peaks_data.append({
+                "idx": i,
+                "x": float(peak_coords[0]),
+                "y": float(peak_coords[1]),
+                "correlation_value": float(peak_val)
+            })
+
             # Mask out region based on diameter to avoid finding the same peak
             d = self.markerDiameter
             margin = d # Use diameter as margin
-            
+
             rstart = max(0, peak_coords[0] - margin)
             rstop = min(xsize - 1, peak_coords[0] + margin)
             cstart = max(0, peak_coords[1] - margin)
             cstop = min(ysize - 1, peak_coords[1] + margin)
-            
+
             if peak_val < self.MEPSILON:
                 print("Registration::OrderFidPoints - peak value is zero.")
-                return None, None, None
-            
+                # Log before returning
+                if self.logger:
+                    self.logger.log_locate_fiducials(
+                        peaks=peaks_data,
+                        threshold=threshold,
+                        weak_retries=peak_count,
+                        candidates=[list(c) for c in Zcoordinates[:i+1]]
+                    )
+                return (None, None, None, "PEAK_VALUE_ZERO")
+
             # Simplified peak check
             # For large markers, the standard offpeak check might be too sensitive
             # Just proceeding if peak is strong enough relative to global max (which is 1.0)
             print(f"Registration::LocateFiducials - Detected peak {i}: {peak_val}.")
-            if peak_val < 0.3:
-                 i -= 1
+            if peak_val < threshold:
                  print(f"Registration::LocateFiducials - Peak too weak ({peak_val}).")
                  peak_count += 1
+                 PIreal[rstart:rstop+1, cstart:cstop+1] = 0.0
                  if peak_count > 20: # Allow more retries
-                     return None, None, None
+                     # Log before returning
+                     if self.logger:
+                         self.logger.log_locate_fiducials(
+                             peaks=peaks_data,
+                             threshold=threshold,
+                             weak_retries=peak_count,
+                             candidates=[list(c) for c in Zcoordinates[:i+1]]
+                         )
+                     return (None, None, None, "PEAK_TOO_WEAK")
                  continue
 
             tZcoordinates[i] = self.FindSubPixelPeak(
@@ -433,17 +507,27 @@ class ZFrameRegistration:
                 PIreal[peak_coords[0], peak_coords[1]-1],
                 PIreal[peak_coords[0], peak_coords[1]+1]
             )
-            
+
             PIreal[rstart:rstop+1, cstart:cstop+1] = 0.0
-        
+            i += 1
+
         center = self.FindFidCentre(tZcoordinates)
         self.FindFidCorners(tZcoordinates, center)
         self.OrderFidPoints(tZcoordinates, center[0], center[1])
-        
+
         for i in range(self.numFiducials):
             Zcoordinates[i] = [int(tZcoordinates[i][0]), int(tZcoordinates[i][1])]
-        
-        return Zcoordinates, tZcoordinates, center
+
+        # Log successful fiducial location
+        if self.logger:
+            self.logger.log_locate_fiducials(
+                peaks=peaks_data,
+                threshold=threshold,
+                weak_retries=peak_count,
+                candidates=[list(c) for c in Zcoordinates]
+            )
+
+        return (Zcoordinates, tZcoordinates, center)
 
     def FindSubPixelPeak(self, peak_coords, Y0, Yx1, Yx2, Yy1, Yy2):
         Xshift = (0.5 * (Yx1 - Yx2)) / (Yx1 + Yx2 - 2.0 * Y0)
@@ -535,33 +619,49 @@ class ZFrameRegistration:
         if self.numFiducials == 7:
             pall = [0, -1, 1, -1, 2, -1, 3, -1, 0]
             pother = [4, 5, 6]
-                
+
+            # Store initial state for logging
+            pall_initial = pall.copy()
+
             for i in range(0, 7, 2):
                 for j in range(3):
                     if pother[j] == -1: continue
-                        
+
                     cdist = self.CoordDistance(points[pall[i]], points[pall[i+2]])
                     pdist1 = self.CoordDistance(points[pall[i]], points[pother[j]])
                     pdist2 = self.CoordDistance(points[pall[i+2]], points[pother[j]])
-                    
+
                     if cdist < self.MEPSILON: continue
-                        
+
                     if ((pdist1 + pdist2) / cdist) < 1.05:
                         pall[i+1] = pother[j]
                         pother[j] = -1
                         break
-            
+
+            # Find missing midpoint slots for logging
+            missing_mid_slots = [i for i in range(1, 8, 2) if pall[i] == -1]
+            pother_final = pother.copy()
+
+            # Log order_fid_points data
+            if self.logger:
+                self.logger.log_order_fid_points(
+                    pall_initial=pall_initial,
+                    pall_final=pall.copy(),
+                    pother_final=pother_final,
+                    missing_mid_slots=missing_mid_slots
+                )
+
             for i in range(1, 9):
                 if pall[i] == -1: break
-            
+
             d1x = points[pall[0]][0] - rmid
             d1y = points[pall[0]][1] - cmid
             d2x = points[pall[2]][0] - rmid
             d2y = points[pall[2]][1] - cmid
             nvecz = (d1x * d2y - d2x * d1y)
-            
+
             direction = -1 if nvecz < 0 else 1
-            
+
             pall2 = []
             curr_i = i
             for _ in range(7):
@@ -569,7 +669,7 @@ class ZFrameRegistration:
                 if curr_i == -1: curr_i = 7
                 if curr_i == 9: curr_i = 1
                 pall2.append(pall[curr_i])
-            
+
             points_temp = [[points[idx][0], points[idx][1]] for idx in pall2]
             for i in range(7):
                 points[i][0] = points_temp[i][0]
